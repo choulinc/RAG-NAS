@@ -1,0 +1,29 @@
+[project]
+name = "ragnas"
+version = "0.1.0"
+requires-python = ">=3.10,<3.12"
+dependencies = [
+  # core
+  "python-dotenv>=1.0.1",
+  "pydantic>=2.7.0",
+  "pyyaml>=6.0.1",
+  "rich>=13.7.1",
+  "tqdm>=4.66.4",
+  # storage
+  "duckdb>=1.0.0",
+  "pandas>=2.2.2",
+  "pyarrow>=16.1.0",
+  # retrieval / vector
+  "numpy>=1.26.4",
+  "faiss-cpu>=1.8.0.post1",
+  "requests>=2.0",
+  # embeddings / llm
+  "openai>=1.40.0",
+  "tiktoken>=0.7.0",
+  # optional rerank later
+  "sentence-transformers>=3.0.1",
+  # ml (surrogate later)
+  "scikit-learn>=1.5.1",
+  "xgboost>=2.1.0",
+  # dev 也能放這裡，但更建議放到 optional-dependencies
+]
