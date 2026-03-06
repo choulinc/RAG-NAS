@@ -26,4 +26,5 @@ dependencies = [
   "scikit-learn>=1.5.1",
   "xgboost>=2.1.0",
   # dev 也能放這裡，但更建議放到 optional-dependencies
+  "rank-bm25>=0.2.2",
 ]
