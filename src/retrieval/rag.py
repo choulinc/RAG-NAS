@@ -1,4 +1,3 @@
-# rag.py
 import argparse
 from retrieve import retrieve
 
@@ -43,6 +42,8 @@ def build_prompt(query: str, hits: list[dict]) -> str:
         if h.get("metrics"):
             lines.append(f"    metrics: {h.get('metrics')}")
         lines.append(f"    config: {h.get('config_repo_path')}")
+        if h.get("paper_url"):
+            lines.append(f"    paper: {h.get('paper_url')}")
         if h.get("weights_url"):
             lines.append(f"    weights: {h.get('weights_url')}")
         lines.append(f"    score: {h.get('score'):.4f}")

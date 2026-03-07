@@ -44,6 +44,7 @@ class UIRRecord:
     doc_id: str
     name: str
     collection: Optional[str]
+    paper_url: Optional[str]
     weights_url: Optional[str]
     config_repo_path: Optional[str]
     config_local: Optional[str]
@@ -416,6 +417,7 @@ def model_entry_to_uir(
         arch = parse_arch_from_config(cfg_text, cfg_repo_path, configs_root)
 
     # merge collection info into metadata
+    paper_url = None
     if collection and collection in collections_by_name:
         c = collections_by_name[collection]
         metadata = {
@@ -425,6 +427,17 @@ def model_entry_to_uir(
             "_collection_readme": c.get("README"),
             "_collection_code": c.get("Code"),
         }
+        cp = c.get("Paper")
+        if isinstance(cp, dict) and cp.get("URL"):
+            paper_url = cp.get("URL")
+        elif isinstance(cp, str):
+            paper_url = str(cp)
+
+    mp = model_entry.get("Paper")
+    if isinstance(mp, dict) and mp.get("URL"):
+        paper_url = mp.get("URL")
+    elif isinstance(mp, str):
+        paper_url = str(mp)
 
     src = UIRSource(
         provider="openmmlab",
@@ -461,6 +474,8 @@ def model_entry_to_uir(
         text_parts.append(f"Config: {cfg_repo_path}")
     if weights_url:
         text_parts.append(f"Weights: {weights_url}")
+    if paper_url:
+        text_parts.append(f"Paper: {paper_url}")
 
     for r in results:
         mtxt = ", ".join([f"{k}={v}" for k, v in r.metrics.items()])
@@ -472,6 +487,7 @@ def model_entry_to_uir(
         doc_id=doc_id,
         name=name,
         collection=collection,
+        paper_url=paper_url,
         weights_url=weights_url,
         config_repo_path=cfg_repo_path,
         config_local=cfg_local,

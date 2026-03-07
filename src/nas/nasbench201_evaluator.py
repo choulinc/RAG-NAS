@@ -1,0 +1,78 @@
+import os
+import threading
+from typing import Dict, Any
+import argparse
+from tqdm import tqdm
+
+try:
+    from nas_201_api import NASBench201API as API
+except ImportError:
+    API = None
+
+class NASBench201Evaluator:
+    def __init__(self, api_path: str):
+        if not API:
+            raise RuntimeError(
+                "API client not available"
+            )
+        if not os.path.exists(api_path):
+            raise FileNotFoundError(f"NAS-Bench-201 API not found at {api_path}")
+        
+        print(f"Loading NAS-Bench-201 from {api_path}")
+        
+        self.api = None
+        def _load():
+            self.api = API(api_path, verbose=False)
+            
+        load_thread = threading.Thread(target=_load)
+        load_thread.start()
+        
+        with tqdm(desc="Loading API", unit="ticks") as pbar:
+            while load_thread.is_alive():
+                pbar.update(1)
+                load_thread.join(timeout=0.1)
+                
+        print("Loaded NAS-Bench-201 successfully.")
+
+    def evaluate(self, arch_str: str, dataset: str = "cifar100", metric: str = "ori-test") -> float:
+        """
+        Evaluate a cell structure string on NAS-Bench-201.
+        Args:
+            arch_str: The architecture string (e.g., "|nor_conv_3x3~0|+|nor_conv_3x3~0|avg_pool_3x3~1|+|...|")
+            dataset: Target dataset ("cifar10-valid", "cifar100", "ImageNet16-120").
+            metric: Target metric ("ori-test", "x-valid", "x-test"). "ori-test" refers to the accuracy on the test set.
+        Returns:
+            The accuracy (float 0-100). If invalid or not found, returns 0.0.
+        """
+        try:
+            index = self.api.query_index_by_arch(arch_str)
+            if index < 0:
+                print(f"[Warning] Architecture {arch_str} not found in NAS-Bench-201.")
+                return 0.0
+            
+            results = self.api.query_meta_info_by_index(index, hp="200")
+            
+            if dataset not in results.get_dataset_names():
+                print(f"[Warning] Dataset {dataset} not supported. Options: {results.get_dataset_names()}")
+                return 0.0
+                
+            res_dict = results.get_metrics(dataset, metric)
+            if 'accuracy' in res_dict:
+                return res_dict['accuracy']
+            return 0.0
+            
+        except Exception as e:
+            print(f"[Error] Failed to evaluate {arch_str}: {e}")
+            return 0.0
+
+if __name__ == "__main__":
+    # CLI 
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--api_path", type=str, required=True, help="Path to NAS-Bench-201-v1_1-096897.pth")
+    ap.add_argument("--arch", type=str, default="|nor_conv_3x3~0|+|nor_conv_3x3~0|avg_pool_3x3~1|+|skip_connect~0|nor_conv_3x3~1|skip_connect~2|")
+    ap.add_argument("--dataset", type=str, default="cifar100")
+    args = ap.parse_args()
+
+    evaluator = NASBench201Evaluator(args.api_path)
+    acc = evaluator.evaluate(args.arch, dataset=args.dataset)
+    print(f"Arch: {args.arch}\nDataset: {args.dataset}\nAccuracy: {acc:.2f}%")

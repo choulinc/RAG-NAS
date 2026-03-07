@@ -81,6 +81,7 @@ def uir_to_views(u: Dict[str, Any]) -> Dict[str, str]:
     collection = u.get("collection", "") or ""
     cfg = u.get("config_repo_path", "") or ""
     weights = u.get("weights_url", "") or ""
+    paper = u.get("paper_url", "") or ""
 
     arch = u.get("arch", {}) or {}
     arch_bits = []
@@ -105,6 +106,7 @@ def uir_to_views(u: Dict[str, Any]) -> Dict[str, str]:
     narrative = (
         f"Model: {name} | Collection: {collection} | {arch_text} | "
         f"Config: {cfg} | "
+        f"{('Paper: ' + paper + ' | ') if paper else ''}"
         f"{('Weights: ' + weights + ' | ') if weights else ''}"
         f"{('Result: ' + res_text) if res_text else ''}"
     ).strip()
@@ -112,6 +114,8 @@ def uir_to_views(u: Dict[str, Any]) -> Dict[str, str]:
     # kv
     kv_lines: List[str] = []
     kv_lines += [f"name: {name}", f"collection: {collection}", f"config_repo_path: {cfg}"]
+    if paper:
+        kv_lines.append(f"paper_url: {paper}")
     if weights:
         kv_lines.append(f"weights_url: {weights}")
     kv_lines += flatten_kv(u.get("metadata", {}), "metadata")
@@ -398,6 +402,7 @@ def retrieve(
                 "metrics": c["metrics"],
                 "config_repo_path": u.get("config_repo_path", ""),
                 "weights_url": u.get("weights_url", ""),
+                "paper_url": u.get("paper_url", ""),
                 "score": float(c["final_score"]),
                 "context_text": c["narrative"] or (u.get("text", "") or ""),
                 # Optional debug fields:
@@ -467,6 +472,8 @@ def _cli():
         print(f"    collection: {h['collection']}")
         print(f"    task/dataset: {h.get('task')} / {h.get('dataset')}")
         print(f"    config: {h.get('config_repo_path')}")
+        if h.get("paper_url"):
+            print(f"    paper: {h.get('paper_url')}")
         if h.get("weights_url"):
             print(f"    weights: {h.get('weights_url')}")
         print(f"    doc_id: {h.get('doc_id')}")

@@ -1,0 +1,17 @@
+# Configuration for the Evolutionary Algorithm
+
+ea:
+  # The size of the population
+  pop_size: 20
+  
+  # The size of the tournament selection sample
+  sample_size: 10
+  
+  # Total number of evolutionary cycles
+  cycles: 100
+  
+  # Maximum retries to sample a valid cell before falling back to complete randomness
+  max_sampling_retries: 100
+  
+  # Maximum retries during mutation to find a valid cell before falling back to the parent
+  max_mutation_retries: 50
