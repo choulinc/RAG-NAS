@@ -416,15 +416,7 @@ def retrieve(
     return hits
 
 
-# -------------------------
-# CLI (optional)
-# -------------------------
-def _cli():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--uir_path", required=True)
-    ap.add_argument("--query", required=True)
-    ap.add_argument("--topk", type=int, default=5)
-
+# CLI 
     ap.add_argument("--task", default=None)
     ap.add_argument("--dataset", default=None)
     ap.add_argument("--collection", default=None)

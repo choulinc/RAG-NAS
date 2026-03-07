@@ -1,8 +1,22 @@
 import os
 import threading
+import functools
 from typing import Dict, Any
 import argparse
 from tqdm import tqdm
+
+# PyTorch >= 2.6 changed torch.load default to weights_only=True.
+# NAS-Bench-201's .pth was saved with numpy globals, which requires weights_only=False.
+import torch
+_original_torch_load = torch.load
+
+@functools.wraps(_original_torch_load)
+def _patched_torch_load(*args, **kwargs):
+    if "weights_only" not in kwargs:
+        kwargs["weights_only"] = False
+    return _original_torch_load(*args, **kwargs)
+
+torch.load = _patched_torch_load
 
 try:
     from nas_201_api import NASBench201API as API
@@ -18,20 +32,8 @@ class NASBench201Evaluator:
         if not os.path.exists(api_path):
             raise FileNotFoundError(f"NAS-Bench-201 API not found at {api_path}")
         
-        print(f"Loading NAS-Bench-201 from {api_path}")
-        
-        self.api = None
-        def _load():
-            self.api = API(api_path, verbose=False)
-            
-        load_thread = threading.Thread(target=_load)
-        load_thread.start()
-        
-        with tqdm(desc="Loading API", unit="ticks") as pbar:
-            while load_thread.is_alive():
-                pbar.update(1)
-                load_thread.join(timeout=0.1)
-                
+        print(f"Loading NAS-Bench-201 from {api_path} (this may take 1-2 minutes)...")
+        self.api = API(api_path, verbose=False)
         print("Loaded NAS-Bench-201 successfully.")
 
     def evaluate(self, arch_str: str, dataset: str = "cifar100", metric: str = "ori-test") -> float:
