@@ -2,7 +2,7 @@ import os
 import sys
 import json
 import argparse
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 try:
     import openai
@@ -11,6 +11,7 @@ except ImportError:
 
 from src.retrieval.retrieve import retrieve
 from src.retrieval.rag import parse_query_to_filters
+from src.retrieval.dataset_analyzer import DatasetProfile
 
 SYSTEM_PROMPT = """\
 You are an expert Neural Architecture Search (NAS) and Deep Learning agent.
@@ -92,13 +93,38 @@ class TemplateGenerator:
     def __init__(self, model_name: str = "gpt-4o"):
         self.model_name = model_name
 
-    def generate_templates(self, query: str, hits: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def generate_templates(
+        self,
+        query: str,
+        hits: List[Dict[str, Any]],
+        profile: Optional[DatasetProfile] = None,
+    ) -> List[Dict[str, Any]]:
         if not openai:
             raise RuntimeError("API client not available. Please install openai: pip install openai")
         
         client = openai.OpenAI() # will pick up OPENAI_API_KEY from env
         context_str = build_context_text(hits)
-        user_message = f"User Query: {query}\n\nContext:\n{context_str}\n\nPlease output the JSON object with the 'templates' array."
+
+        # Enrich prompt with dataset profile if available
+        profile_str = ""
+        if profile:
+            profile_str = (
+                f"\n--- DATASET PROFILE ---\n"
+                f"Task: {profile.task}\n"
+                f"Domain: {profile.domain}\n"
+                f"Keywords: {', '.join(profile.keywords)}\n"
+                f"Number of classes: {profile.num_classes}\n"
+                f"Image size (median): {profile.image_stats.median_height}x{profile.image_stats.median_width}\n"
+                f"Image channels: {profile.image_stats.channels}\n"
+                f"Total images: {profile.image_stats.total_count}\n"
+            )
+
+        user_message = (
+            f"User Query: {query}\n"
+            f"{profile_str}\n"
+            f"Context:\n{context_str}\n\n"
+            f"Please output the JSON object with the 'templates' array."
+        )
 
         print(f"Calling LLM ({self.model_name}) to generate EA search space templates...")
         response = client.chat.completions.create(

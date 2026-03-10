@@ -1,4 +1,35 @@
+# env
 .env
+.venv/
+__pycache__/
+
+# uv
 uv.lock
+
+# os
 .DS_Store
+
+# data (large files)
 data/
+
+# build artifacts
+*.egg-info/
+dist/
+build/
+
+# model checkpoints
+checkpoints/
+
+# cache
+.cache/
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# logs
+log/
+*.log
