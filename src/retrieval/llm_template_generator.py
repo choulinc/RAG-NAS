@@ -90,6 +90,7 @@ def build_context_text(hits: List[Dict[str, Any]]) -> str:
 
 
 class TemplateGenerator:
+    """OpenAI API-based template generator (cloud, no GPU required)."""
     def __init__(self, model_name: str = "gpt-4o"):
         self.model_name = model_name
 
@@ -150,13 +151,61 @@ class TemplateGenerator:
             return []
 
 
+def get_template_generator(
+    *,
+    use_local: bool | None = None,
+    model_name: str | None = None,
+) -> "TemplateGenerator | LocalTemplateGenerator":
+    """Factory that returns the appropriate template generator.
+
+    Decision logic:
+      - use_local=True  → always use local Qwen model (raises if no CUDA)
+      - use_local=False → always use OpenAI API
+      - use_local=None  → auto: local if CUDA available, else OpenAI
+    """
+    _auto = use_local is None
+
+    try:
+        from src.retrieval.local_template_generator import (
+            LocalTemplateGenerator,
+            is_cuda_available,
+        )
+        cuda_ok = is_cuda_available()
+    except ImportError:
+        cuda_ok = False
+
+    if use_local is True and not cuda_ok:
+        raise RuntimeError(
+            "--local was specified but CUDA is not available. "
+            "Please run on a machine with a CUDA-capable GPU and "
+            "install torch + transformers."
+        )
+
+    if cuda_ok and use_local is not False:
+        backend = "local (auto-detected)" if _auto else "local (forced)"
+        print(f"[TemplateGenerator] Using {backend} → Qwen2.5-14B-Instruct")
+        return LocalTemplateGenerator(model_name=model_name)
+    else:
+        api_model = model_name or "gpt-4o"
+        if _auto:
+            print(f"[TemplateGenerator] CUDA not available → falling back to OpenAI API ({api_model})")
+        else:
+            print(f"[TemplateGenerator] Using OpenAI API ({api_model})")
+        return TemplateGenerator(model_name=api_model)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--uir_path", required=True)
     ap.add_argument("--query", required=True)
     ap.add_argument("--topk", type=int, default=5)
-    ap.add_argument("--model", type=str, default="gpt-4o")
+    ap.add_argument("--model", type=str, default=None,
+                    help="Model name. For local: HF model id; for API: OpenAI model name.")
     ap.add_argument("--out", type=str, default="data/processed/templates/llm_templates.json")
+    ap.add_argument("--local", dest="use_local", action="store_true", default=None,
+                    help="Force local Qwen model (requires CUDA).")
+    ap.add_argument("--no-local", dest="use_local", action="store_false",
+                    help="Force OpenAI API even if CUDA is available.")
     args = ap.parse_args()
 
     # Add project root to sys.path so we can import src.retrieval
@@ -170,7 +219,7 @@ def main():
         print("No retrieval results found.")
         return
 
-    generator = TemplateGenerator(model_name=args.model)
+    generator = get_template_generator(use_local=args.use_local, model_name=args.model)
     templates = generator.generate_templates(args.query, hits)
     
     os.makedirs(os.path.dirname(args.out), exist_ok=True)

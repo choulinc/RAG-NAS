@@ -10,28 +10,28 @@ import ast
 
 @dataclass
 class UIRSource:
-    provider: str #openmmlab
-    repo: str #mmdetection
-    branch: str #main
-    metafile_local: str #local path to metafile.yml
-    metafile_repo_path: Optional[str] = None #configs/atss/metafile.yml
-    config_local: Optional[str] = None #local path to config .pys
-    config_repo_path: Optional[str] = None #configs/atss/atss_r50_fpn_1x_coco.py
+    provider: str # openmmlab
+    repo: str # mmdetection
+    branch: str # main
+    metafile_local: str # local path to metafile.yml
+    metafile_repo_path: Optional[str] = None # configs/atss/metafile.yml
+    config_local: Optional[str] = None # local path to config .pys
+    config_repo_path: Optional[str] = None #c onfigs/atss/atss_r50_fpn_1x_coco.py
 
 @dataclass
 class UIRMetrics:
     task: str
     dataset: str
-    metrics: Dict[str, float] #{"box AP": 39.4}
+    metrics: Dict[str, float] # {"box AP": 39.4}
 
 
 @dataclass
 class UIRArch:
-    model_type: Optional[str] = None #"ATSS"
-    detector: Optional[str] = None #model_type
-    backbone: Optional[str] = None #"ResNet"
-    neck: Optional[str] = None #"FPN"
-    head: Optional[str] = None #"ATSSHead", "RPNHead", "ROIHead"
+    model_type: Optional[str] = None # "ATSS"
+    detector: Optional[str] = None # model_type
+    backbone: Optional[str] = None # "ResNet"
+    neck: Optional[str] = None # "FPN"
+    head: Optional[str] = None # "ATSSHead", "RPNHead", "ROIHead"
     roi_head: Optional[str] = None
     bbox_head: Optional[str] = None
     mask_head: Optional[str] = None
@@ -51,7 +51,7 @@ class UIRRecord:
     metadata: Dict[str, Any]
     results: List[UIRMetrics]
     arch: UIRArch
-    text: str #text description for embedding & LLM
+    text: str # text description for embedding & LLM
     source: UIRSource
 
 def find_repo_root(start: Path) -> Path:
@@ -61,7 +61,7 @@ def find_repo_root(start: Path) -> Path:
             return p
     return cur
 
-#sha1 hash
+# sha1 hash
 def sha1(s: str) -> str:
     return hashlib.sha1(s.encode("utf-8")).hexdigest()
 
@@ -81,16 +81,16 @@ def normalize_slashes(s: str) -> str:
     return s.replace("\\", "/")
 
 def infer_metafile_repo_path(metafile_path: Path) -> Optional[str]:
-    #.../metafiles/configs/atss/metafile.yml -> configs/atss/metafile.yml
+    # .../metafiles/configs/atss/metafile.yml -> configs/atss/metafile.yml
     s = normalize_slashes(metafile_path.as_posix())
     m = re.search(r"/metafiles/(configs/.+/metafile\.ya?ml)$", s)
     if m:
         return m.group(1)
     return None
 
-#parse yml
+# parse yml
 def parse_metafile(metafile_path: Path) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
-    #回傳 1. collection map 2. model list
+    # return 1. collection map 2. model list
     yml_obj = safe_load_yaml_file(metafile_path)
     if not isinstance(yml_obj, dict):
         return ({}, [])
@@ -129,7 +129,7 @@ def normalize_config_py_path(metafile_path: Path, config_field: str) -> str:
     return f"configs/unknown/{cf}"
 
 
-#ast
+# ast
 def _ast_get_name(node: ast.AST) -> Optional[str]:
     if isinstance(node, ast.Name):
         return node.id
@@ -153,7 +153,7 @@ def _literal_str_list(node: ast.AST) -> Optional[List[str]]:
         return out
     return None
 
-#open base
+# open base
 def extract_base_paths_from_config(cfg_text: str) -> List[str]:
     try:
         tree = ast.parse(cfg_text)
@@ -174,7 +174,8 @@ def extract_base_paths_from_config(cfg_text: str) -> List[str]:
     return []
 
 def resolve_config_local_path(configs_root: Path, cfg_repo_path: str) -> Optional[Path]:
-    # case 1: configs_root = repo root (.../mmdetection)
+    # case 1: configs_root = repo root 
+    # .../mmdetection
     p1 = configs_root / cfg_repo_path
 
     # case 2: configs_root = .../mmdetection/configs
@@ -196,21 +197,17 @@ def normalize_base_config_repo_path(curr_cfg_repo_path: str, base_ref: str) -> s
     if base_ref.startswith("configs/"):
         return normalize_slashes(base_ref)
 
-    # repo-style relative resolve
+    # resolve repo-style relative
     resolved = (curr.parent / base_ref).as_posix()
-    # Path.as_posix keeps '..', normalize with PurePath-like behavior by Path
-    # but on relative path it's okay; clean manually:
     return normalize_slashes(str(Path(resolved)))
 
+# DFS _base_ tree, extract 'type'
 def extract_types_with_bases(
     cfg_repo_path: str,
     configs_root: Path,
     visited: Optional[set[str]] = None,
 ) -> Dict[str, str]:
-    """
-    Recursively parse current config and its _base_ chain.
-    Merge rule: base first, then current overrides.
-    """
+# child overrides base
     if visited is None:
         visited = set()
     if cfg_repo_path in visited:
@@ -223,10 +220,10 @@ def extract_types_with_bases(
 
     cfg_text = read_text(local_path)
 
-    #parse current file types
+    # parse current file types
     current = extract_all_types_from_config(cfg_text)
 
-    #parse bases
+    # parse bases
     merged: Dict[str, str] = {}
     base_refs = extract_base_paths_from_config(cfg_text)
 
@@ -235,31 +232,31 @@ def extract_types_with_bases(
         base_types = extract_types_with_bases(b_repo, configs_root, visited)
         merged.update(base_types)
 
-    #current overrides base
+    # current overrides base
     merged.update(current)
     return merged
 
 def _extract_types_from_node(node: ast.AST, path: str, out: Dict[str, str]) -> None:
-    #dict()
+    # dict()
     if isinstance(node, ast.Call) and _ast_get_name(node.func) == "dict":
-        #keyword
+        # keyword
         kw_map: Dict[str, ast.AST] = {}
         for kw in node.keywords:
             if kw.arg is None:
                 continue
             kw_map[kw.arg] = kw.value
-        #e.g.
-        #input: dict(type='ResNet', depth=50)
-        #keyword(arg="type", value=Constant("ResNet"))
-        #keyword(arg="depth", value=Constant(50))
+        # e.g.
+        # input: dict(type='ResNet', depth=50)
+        # keyword(arg="type", value=Constant("ResNet"))
+        # keyword(arg="depth", value=Constant(50))
 
-        #"type="
+        # "type="
         tnode = kw_map.get("type")
         tval = _literal_str(tnode) if tnode is not None else None
         if tval:
             out[path] = tval
 
-        #recurse
+        # recurse
         for k, v in kw_map.items():
             _extract_types_from_node(v, f"{path}.{k}", out)
         return
@@ -294,7 +291,7 @@ def _extract_types_from_node(node: ast.AST, path: str, out: Dict[str, str]) -> N
     return
 
 
-#"type="
+# "type="
 def extract_all_types_from_config(cfg_text: str) -> Dict[str, str]:
     out: Dict[str, str] = {}
     try:
@@ -302,14 +299,14 @@ def extract_all_types_from_config(cfg_text: str) -> Dict[str, str]:
     except SyntaxError:
         return out
 
-    for node in tree.body: #find model dict
-        #model = dict()
+    for node in tree.body: # find model dict
+        # model = dict()
         if isinstance(node, ast.Assign):
             for target in node.targets:
                 if isinstance(target, ast.Name) and target.id == "model":
                     _extract_types_from_node(node.value, "model", out)
                     return out
-        #model: dict = 
+        # model: dict = 
         if isinstance(node, ast.AnnAssign):
             if isinstance(node.target, ast.Name) and node.target.id == "model":
                 if node.value is not None:
@@ -511,7 +508,7 @@ def build_openmmlab_uir_jsonl(
     failures: List[Dict[str, Any]] = []
     n = 0
 
-    # find all metafile.yml / metafile.yaml
+    # find all metafile.yml or metafile.yaml
     metafile_paths = sorted(
         list(metafiles_dir.rglob("metafile.yml")) + list(metafiles_dir.rglob("metafile.yaml"))
     )
@@ -559,7 +556,7 @@ def build_openmmlab_uir_jsonl(
                     configs_root=configs_root,
                 )
 
-                # 額外記錄一些「不算 crash，但資料缺漏」的情況
+                # missing data
                 if rec.config_repo_path is None:
                     failures.append({
                         "stage": "missing_config_repo_path",
@@ -577,7 +574,7 @@ def build_openmmlab_uir_jsonl(
                         "error": "Config .py not found locally",
                     })
 
-                # 有 config 但沒解析出 model type（通常是 AST 抓不到）
+                # AST fail to get model type
                 if rec.config_local and rec.arch.model_type is None:
                     failures.append({
                         "stage": "ast_parse_no_model_type",
@@ -633,7 +630,7 @@ if __name__ == "__main__":
     )
     print(f"Wrote {n} records to {out_jsonl}")
 
-    #failure list
+    # failure list
     failure_path = out_fail_json    
     failure_path.parent.mkdir(parents=True, exist_ok=True)
     failure_path.write_text(json.dumps(failures, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -644,7 +641,7 @@ if __name__ == "__main__":
     for f in failures[:10]:
         print(" -", f)
 
-    # ── MMPreTrain (Image Classification) ──
+    # mmpretrain for image classification
     print("\n" + "=" * 60)
     print("Building UIR for mmpretrain ...")
     print("=" * 60)

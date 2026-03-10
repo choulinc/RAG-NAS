@@ -38,12 +38,12 @@ class OpenMMLabSource:
         return metafiles
 
 def raw_url(spec: RepoSpec, path: str) -> str:
-    #input spec & path -> github raw url
+    # input spec & path -> github raw url
     path = path.lstrip("/")
     return f"{GITHUB_RAW}/{spec.author}/{spec.repo}/{spec.branch}/{path}"
 
 def http_get_text(url: str, timeout: int = 30) -> str:
-    #input url then request it -> text
+    # input url then request it -> text
     response = SESSION.get(url, timeout=timeout)
     response.raise_for_status()
     return response.text
@@ -74,12 +74,12 @@ def download_one_metafile(spec: RepoSpec, mf_path: str, save_root: Path) -> Path
 def get_metafiles(model_index_yaml) -> list[str]:
     obj: Any = yaml.safe_load(model_index_yaml)
     if not isinstance(obj, dict):
-        #ensure if its dict
+        # ensure if it is dict
         return []
     
     imports = obj.get("Import") or obj.get("Imports")
     if not isinstance(imports, list):
-        #ensure if its list
+        # ensure if it is list
         return []
 
     out: list[str] = []
@@ -155,7 +155,7 @@ def download_configs(
     return saved, failed
 
 def normalize_config_path_from_metafile(metafile_local_path: Path, config_field: str) -> str:
-    #normalize_config_path into repo path configs/.../*.py
+    # normalize_config_path into repo path configs/.../*.py
     cf = config_field.strip().replace("\\", "/")
     if cf.startswith("./"):
         cf = cf[2:]
@@ -175,7 +175,7 @@ def normalize_config_path_from_metafile(metafile_local_path: Path, config_field:
 
 
 def get_config_paths_from_metafile_file(metafile_local_path: Path) -> list[str]:
-    #read metafile.yml, get Models[*].Config repo path
+    # read metafile.yml, get Models[*].Config repo path
     text = metafile_local_path.read_text(encoding="utf-8", errors="ignore")
     obj = yaml.safe_load(text)
 
@@ -221,7 +221,7 @@ def download_configs_from_metafiles(
     base_dir: Path,
     max_configs: Optional[int] = None,
 ) -> tuple[list[Path], list[dict]]:
-    #config.py from metafile.yml to base_dir/configs/...
+    # config.py from metafile.yml to base_dir/configs/...
     save_root = base_dir
 
     saved: list[Path] = []
@@ -345,6 +345,7 @@ def download_base_configs(
 if __name__ == "__main__":
     REPO_ROOT = find_repo_root(Path(__file__).resolve())
     out_root = REPO_ROOT / "data" / "raw" / "openMMLab"
+    # mmdetection
     repo = RepoSpec(repo="mmdetection", branch="main")
     source = OpenMMLabSource(out_root=out_root, repo=repo)
     metafiles = source.crawl_modelzoo()
@@ -380,7 +381,7 @@ if __name__ == "__main__":
         if len(all_failures) > 20:
             print(f" ... and {len(all_failures) - 20} more")
 
-    #MMPreTrain (Image Classification)
+    # mmpretrain for image classification
     print("\n" + "=" * 60)
     print("Syncing mmpretrain ...")
     print("=" * 60)

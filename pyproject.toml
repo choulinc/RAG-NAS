@@ -20,6 +20,9 @@ dependencies = [
   # embeddings / llm
   "openai>=1.40.0",
   "tiktoken>=0.7.0",
+  # local llm (Qwen2.5-14B-Instruct)
+  "transformers>=4.40.0",
+  "accelerate>=0.30.0",
   # optional rerank later
   "sentence-transformers>=3.0.1",
   # ml (surrogate later)
