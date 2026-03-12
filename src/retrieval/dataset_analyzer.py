@@ -1,5 +1,5 @@
 """
-Dataset Analyzer — Text pathway for RAG-NAS retrieval.
+Text analyzer for RAG-NAS retrieval
 
 Scans a user-provided dataset directory to infer:
   - task type (classification, detection, segmentation, ...)

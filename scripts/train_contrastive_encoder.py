@@ -1,11 +1,8 @@
 """
-Contrastive Encoder 訓練腳本
-
-使用 NAS-Bench-201 的資料集 (CIFAR-10, CIFAR-100) 訓練 Siamese Encoder
-學習區分不同視覺類別的特徵表示。
+使用 NAS-Bench-201 的 CIFAR-10, CIFAR-100 訓練 Siamese Encoder
 
 用法:
-    # 基本訓練 (使用 CIFAR-10)
+    # CIFAR-10
     python scripts/train_contrastive_encoder.py
 
     # 自訂參數

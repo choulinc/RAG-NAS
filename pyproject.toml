@@ -33,4 +33,5 @@ dependencies = [
   "torch>=2.0.0",
   "torchvision>=0.15.0",
   "Pillow>=10.0.0",
+  "pytest>=9.0.2",
 ]
