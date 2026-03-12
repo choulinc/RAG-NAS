@@ -1,5 +1,5 @@
 import argparse
-from retrieve import retrieve
+from src.retrieval.retrieve import retrieve
 
 def parse_query_to_filters(q: str):
     ql = q.lower()

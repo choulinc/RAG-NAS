@@ -7,7 +7,7 @@ but runs inference locally on GPU using the Qwen2.5-14B-Instruct model.
 
 import json
 import re
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 try:
     import torch
@@ -50,7 +50,7 @@ class LocalTemplateGenerator:
         print(f"Loading model {self.model_name} (this may take a while) ...")
         self.model = AutoModelForCausalLM.from_pretrained(
             self.model_name,
-            torch_dtype=torch.bfloat16,
+            dtype=torch.bfloat16,
             device_map=device,
             trust_remote_code=True,
         )
@@ -61,11 +61,30 @@ class LocalTemplateGenerator:
     # Public API  (same signature as TemplateGenerator.generate_templates)
     # ------------------------------------------------------------------
     def generate_templates(
-        self, query: str, hits: List[Dict[str, Any]]
+        self,
+        query: str,
+        hits: List[Dict[str, Any]],
+        profile=None,
     ) -> List[Dict[str, Any]]:
         context_str = build_context_text(hits)
+
+        # Enrich prompt with dataset profile if available
+        profile_str = ""
+        if profile:
+            profile_str = (
+                f"\n--- DATASET PROFILE ---\n"
+                f"Task: {profile.task}\n"
+                f"Domain: {profile.domain}\n"
+                f"Keywords: {', '.join(profile.keywords)}\n"
+                f"Number of classes: {profile.num_classes}\n"
+                f"Image size (median): {profile.image_stats.median_height}x{profile.image_stats.median_width}\n"
+                f"Image channels: {profile.image_stats.channels}\n"
+                f"Total images: {profile.image_stats.total_count}\n"
+            )
+
         user_message = (
-            f"User Query: {query}\n\n"
+            f"User Query: {query}\n"
+            f"{profile_str}\n"
             f"Context:\n{context_str}\n\n"
             "Please output the JSON object with the 'templates' array."
         )

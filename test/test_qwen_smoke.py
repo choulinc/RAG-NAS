@@ -40,7 +40,7 @@ def test_basic_load(model_name: str, device: str):
     print(f"  Loading model ...")
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        torch_dtype=torch.float16,
+        dtype=torch.float16,
         device_map=device if device == "auto" else {"": device},
         trust_remote_code=True,
     )

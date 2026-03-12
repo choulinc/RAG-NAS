@@ -102,6 +102,7 @@ def create_mock_uir(uir_path: str) -> str:
             "collection": "ConvNeXt",
             "config_repo_path": "configs/convnext/convnext-tiny_cifar10.py",
             "weights_url": "https://download.openmmlab.com/convnext_tiny_cifar10.pth",
+            "paper_url": "https://arxiv.org/abs/2201.03545",
             "arch": {"backbone": "ConvNeXt", "head": "LinearClsHead"},
             "results": [
                 {"task": "Image Classification", "dataset": "CIFAR-10",
@@ -115,6 +116,7 @@ def create_mock_uir(uir_path: str) -> str:
             "collection": "MobileNet",
             "config_repo_path": "configs/mobilenet/mobilenet_v2_cifar100.py",
             "weights_url": "https://download.openmmlab.com/mobilenet_v2_cifar100.pth",
+            "paper_url": "https://arxiv.org/abs/1801.04381",
             "arch": {"backbone": "MobileNetV2", "head": "LinearClsHead"},
             "results": [
                 {"task": "Image Classification", "dataset": "CIFAR-100",
@@ -128,6 +130,7 @@ def create_mock_uir(uir_path: str) -> str:
             "collection": "Swin",
             "config_repo_path": "configs/swin/swin-tiny_imagenet.py",
             "weights_url": "https://download.openmmlab.com/swin_tiny_imagenet.pth",
+            "paper_url": "https://arxiv.org/abs/2103.14030",
             "arch": {"backbone": "SwinTransformer", "head": "LinearClsHead"},
             "results": [
                 {"task": "Image Classification", "dataset": "ImageNet-1k",
@@ -193,6 +196,7 @@ def mock_generate_templates(query: str, hits: list, profile) -> list:
                 {
                     "doc_id": h.get("doc_id", ""),
                     "config_repo_path": h.get("config_repo_path", ""),
+                    "paper_url": h.get("paper_url", ""),
                     "why": f"Retrieved with score {h.get('score', 0):.4f}",
                 }
                 for h in hits[:2]
@@ -228,6 +232,7 @@ def mock_generate_templates(query: str, hits: list, profile) -> list:
                 {
                     "doc_id": h.get("doc_id", ""),
                     "config_repo_path": h.get("config_repo_path", ""),
+                    "paper_url": h.get("paper_url", ""),
                     "why": f"Retrieved with score {h.get('score', 0):.4f}",
                 }
                 for h in hits[1:3]
@@ -439,31 +444,47 @@ def run_e2e_test():
             print(f"  {i:<5} {f['doc_id']:<30} {f['text']:>7.4f} {f['image']:>7.4f} {f['final']:>7.4f}")
 
         # ─────────────────────────────────────────────────────────
-        # STEP 6: Mock LLM Template Generation
+        # STEP 6: LLM Template Generation (auto: Qwen / Mock)
         # ─────────────────────────────────────────────────────────
         print("\n" + "─" * 50)
-        print("STEP 6: LLM Template Generation (Mock)")
+        print("STEP 6: LLM Template Generation")
         print("─" * 50)
 
-        templates = mock_generate_templates(query, text_hits, profile)
+        import torch
+        use_local_llm = torch.cuda.is_available()
+
+        if use_local_llm:
+            print("\n  CUDA detected → using local Qwen model")
+            from src.retrieval.llm_template_generator import get_template_generator
+            generator = get_template_generator(use_local=True)
+            result = generator.generate_templates(query, text_hits, profile=profile)
+            templates = result if isinstance(result, list) else [result]
+        else:
+            print("\n  No CUDA → using Mock templates")
+            templates = mock_generate_templates(query, text_hits, profile)
 
         print(f"\n  Generated {len(templates)} templates:\n")
         for i, tmpl in enumerate(templates, 1):
-            print(f"  Template {i}: \"{tmpl['paradigm']}\"")
-            print(f"    Task:      {tmpl['task']}")
-            print(f"    Backbones: {tmpl['macro']['backbone']}")
-            print(f"    Heads:     {tmpl['macro']['head']}")
-            nb201 = tmpl["micro"]["nb201"]
-            print(f"    NB201 op_prior:")
-            for op, p in nb201["op_prior"].items():
-                bar = "█" * int(p * 30)
-                print(f"      {op:<16} {p:.2f} {bar}")
-            print(f"    Constraints:")
-            for c in nb201.get("constraints", []):
-                print(f"      {c['type']}: {c['op']} <= {c.get('value')} ({c.get('reason', '')})")
-            print(f"    Evidence:")
-            for ev in tmpl.get("evidence", [])[:2]:
-                print(f"      - {ev.get('doc_id')}: {ev.get('why')}")
+            print(f"  Template {i}: \"{tmpl.get('paradigm', 'unnamed')}\"")
+            print(f"    Task:      {tmpl.get('task', 'N/A')}")
+            print(f"    Backbones: {tmpl.get('macro', {}).get('backbone', [])}")
+            print(f"    Heads:     {tmpl.get('macro', {}).get('head', [])}")
+            nb201 = tmpl.get("micro", {}).get("nb201", {})
+            if nb201.get("op_prior"):
+                print(f"    NB201 op_prior:")
+                for op, p in nb201["op_prior"].items():
+                    bar = "█" * int(p * 30)
+                    print(f"      {op:<16} {p:.2f} {bar}")
+            if nb201.get("constraints"):
+                print(f"    Constraints:")
+                for c in nb201["constraints"]:
+                    print(f"      {c['type']}: {c['op']} <= {c.get('value')} ({c.get('reason', '')})")
+            if tmpl.get("evidence"):
+                print(f"    Evidence:")
+                for ev in tmpl["evidence"][:2]:
+                    paper = ev.get('paper_url', '')
+                    paper_str = f" | paper: {paper}" if paper else ""
+                    print(f"      - {ev.get('doc_id')}: {ev.get('why')}{paper_str}")
             print()
 
         # ─────────────────────────────────────────────────────────
@@ -495,7 +516,13 @@ def run_e2e_test():
         print("STEP 8: NAS-Bench-201 Evaluation — 查表取得真實準確率")
         print("─" * 50)
 
-        NB201_API_PATH = "data/NAS-Bench/NAS-Bench-201-v1_1-096897.pth"
+        NB201_API_PATH = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..",
+            "data", "NAS-Bench", "NAS-Bench-201-v1_1-096897.pth"
+        )
+        # Also try from project root
+        if not os.path.exists(NB201_API_PATH):
+            NB201_API_PATH = "data/NAS-Bench/NAS-Bench-201-v1_1-096897.pth"
         NB201_DATASETS = ["cifar10-valid", "cifar100", "ImageNet16-120"]
 
         use_real_api = os.path.exists(NB201_API_PATH)
@@ -580,8 +607,9 @@ def run_e2e_test():
      - Top hit: {image_hits[0]['doc_id'] if image_hits else 'N/A'}
 
   4. Templates Generated: {len(templates)}
-     - {templates[0]['paradigm']}
-     - {templates[1]['paradigm']}
+     - LLM: {'Local Qwen' if use_local_llm else 'Mock'}
+     - {templates[0].get('paradigm', 'unnamed') if templates else 'N/A'}
+     - {templates[1].get('paradigm', 'unnamed') if len(templates) > 1 else 'N/A'}
 
   5. NB201 Evaluation:
      - API: {'Real' if use_real_api else 'Mock'}
