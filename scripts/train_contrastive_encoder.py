@@ -41,6 +41,7 @@ from PIL import Image
 
 from src.retrieval.contrastive_encoder import (
     ContrastiveLoss,
+    ContrastivePairDataset,
     SiameseEncoder,
 )
 
@@ -120,70 +121,8 @@ def download_and_organize_cifar(
     return task_to_images
 
 
-# ---------------------------------------------------------------------------
-# Step 2: Pair Dataset — 產生 positive / negative pairs
-# ---------------------------------------------------------------------------
-
-class CIFARPairDataset(Dataset):
-    """
-    從 task_to_images 產生配對：
-    - Positive pair (y=1): 兩張圖來自同一個 class
-    - Negative pair (y=0): 兩張圖來自不同 class
-    """
-
-    def __init__(
-        self,
-        task_to_images: dict[str, list[str]],
-        pairs_per_epoch: int = 4000,
-        image_size: int = 32,
-    ):
-        self.task_to_images = task_to_images
-        self.task_names = [k for k, v in task_to_images.items() if len(v) >= 2]
-        self.pairs_per_epoch = pairs_per_epoch
-
-        self.transform = T.Compose([
-            T.Resize((image_size, image_size)),
-            T.RandomHorizontalFlip(),
-            T.RandomCrop(image_size, padding=4),
-            T.ToTensor(),
-            T.Normalize(
-                mean=[0.4914, 0.4822, 0.4465],
-                std=[0.2023, 0.1994, 0.2010],
-            ),
-        ])
-
-        self.pairs = []
-        self._build_pairs()
-
-    def _build_pairs(self):
-        self.pairs = []
-        n_pos = self.pairs_per_epoch // 2
-        n_neg = self.pairs_per_epoch - n_pos
-
-        # Positive pairs
-        for _ in range(n_pos):
-            cls = random.choice(self.task_names)
-            imgs = self.task_to_images[cls]
-            i1, i2 = random.sample(range(len(imgs)), 2)
-            self.pairs.append((imgs[i1], imgs[i2], 1.0))
-
-        # Negative pairs
-        for _ in range(n_neg):
-            c1, c2 = random.sample(self.task_names, 2)
-            i1 = random.choice(self.task_to_images[c1])
-            i2 = random.choice(self.task_to_images[c2])
-            self.pairs.append((i1, i2, 0.0))
-
-        random.shuffle(self.pairs)
-
-    def __len__(self):
-        return len(self.pairs)
-
-    def __getitem__(self, idx):
-        p1, p2, label = self.pairs[idx]
-        img1 = Image.open(p1).convert("RGB")
-        img2 = Image.open(p2).convert("RGB")
-        return self.transform(img1), self.transform(img2), torch.tensor(label)
+# NOTE: Pair dataset logic is now provided by ContrastivePairDataset
+# from src.retrieval.contrastive_encoder (imported above).
 
 
 # ---------------------------------------------------------------------------
@@ -225,7 +164,7 @@ def train(
 
     # ─── Step 2: 建 Dataset & DataLoader ───
     print(f"\n建立 Pair Dataset (每 epoch {pairs_per_epoch} pairs) ...")
-    pair_dataset = CIFARPairDataset(
+    pair_dataset = ContrastivePairDataset(
         task_to_images=task_to_images,
         pairs_per_epoch=pairs_per_epoch,
     )
@@ -257,6 +196,7 @@ def train(
 
     history = []
     best_loss = float("inf")
+    best_path = None
 
     for epoch in range(1, epochs + 1):
         encoder.train()
@@ -265,7 +205,7 @@ def train(
         t0 = time.time()
 
         # 每個 epoch 重新產生 pairs（增加多樣性）
-        pair_dataset._build_pairs()
+        pair_dataset.reshuffle()
 
         for img1, img2, labels in loader:
             img1 = img1.to(device)
@@ -323,7 +263,10 @@ def train(
     print(f"\n訓練完成！")
     print(f"   Best loss: {best_loss:.5f}")
     print(f"   Checkpoint: {final_path}")
-    print(f"   Best model: {best_path}")
+    if best_path:
+        print(f"   Best model: {best_path}")
+    else:
+        print("   Best model: (no improvement recorded)")
 
     return encoder, history
 

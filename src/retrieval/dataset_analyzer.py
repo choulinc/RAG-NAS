@@ -115,7 +115,24 @@ TASK_KEYWORDS = {
 # ---------------------------------------------------------------------------
 
 class DatasetAnalyzer:
-    """Analyze a dataset directory to produce a DatasetProfile."""
+    """Analyze a dataset directory to produce a DatasetProfile.
+
+    .. warning:: **Heuristic-based analyzer — not a verified parser.**
+
+       This analyzer infers task type, domain, and class information from
+       common directory structures and naming conventions. It is designed for
+       well-organized datasets that follow popular patterns (ImageFolder,
+       YOLO, COCO, VOC, etc.). It may produce inaccurate results for:
+
+       - Datasets with annotations in deeply nested subdirectories
+       - Non-standard segmentation mask naming conventions
+       - Datasets without a README or with minimal textual metadata
+       - Multi-task datasets (only the first matched task is returned)
+       - Domain-specific datasets not listed in ``KNOWN_DATASETS``
+
+       Always review the returned ``DatasetProfile`` before relying on it
+       for downstream retrieval or template generation.
+    """
 
     def __init__(self, max_image_samples: int = 50):
         self.max_image_samples = max_image_samples

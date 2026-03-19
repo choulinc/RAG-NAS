@@ -416,7 +416,17 @@ def retrieve(
     return hits
 
 
-# CLI 
+# -------------------------
+# CLI
+# -------------------------
+def _cli():
+    ap = argparse.ArgumentParser(
+        description="Retrieve top-k OpenMMLab UIR entries for a query."
+    )
+    ap.add_argument("--uir_path", required=True, help="Path to UIR JSONL file")
+    ap.add_argument("--query", required=True, help="Search query string")
+    ap.add_argument("--topk", type=int, default=5, help="Number of results (default: 5)")
+
     ap.add_argument("--task", default=None)
     ap.add_argument("--dataset", default=None)
     ap.add_argument("--collection", default=None)
@@ -470,6 +480,7 @@ def retrieve(
             print(f"    weights: {h.get('weights_url')}")
         print(f"    doc_id: {h.get('doc_id')}")
         print(f"    summary: {h.get('context_text')}")
+
 
 if __name__ == "__main__":
     _cli()

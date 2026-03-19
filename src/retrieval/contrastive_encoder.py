@@ -173,6 +173,9 @@ class ContrastivePairDataset(Dataset):
     ):
         self.task_to_images = task_to_images
         self.task_names = list(task_to_images.keys())
+        # Filtered pools for safe sampling
+        self.positive_pool = [k for k, v in task_to_images.items() if len(v) >= 2]
+        self.negative_pool = [k for k, v in task_to_images.items() if len(v) >= 1]
         self.pairs_per_epoch = pairs_per_epoch
         self.pairs: List[PairSample] = []
         self._build_pairs()
@@ -200,19 +203,19 @@ class ContrastivePairDataset(Dataset):
         n_pos = self.pairs_per_epoch // 2
         n_neg = self.pairs_per_epoch - n_pos
 
-        # Positive pairs: same task type
+        # Positive pairs: same task type (requires ≥2 images)
         for _ in range(n_pos):
-            task = random.choice(self.task_names)
+            if not self.positive_pool:
+                break
+            task = random.choice(self.positive_pool)
             imgs = self.task_to_images[task]
-            if len(imgs) < 2:
-                continue
             i1, i2 = random.sample(range(len(imgs)), 2)
             self.pairs.append(PairSample(imgs[i1], imgs[i2], 1.0))
 
-        # Negative pairs: different task types
-        if len(self.task_names) >= 2:
+        # Negative pairs: different task types (requires ≥1 image each)
+        if len(self.negative_pool) >= 2:
             for _ in range(n_neg):
-                t1, t2 = random.sample(self.task_names, 2)
+                t1, t2 = random.sample(self.negative_pool, 2)
                 i1 = random.choice(self.task_to_images[t1])
                 i2 = random.choice(self.task_to_images[t2])
                 self.pairs.append(PairSample(i1, i2, 0.0))
