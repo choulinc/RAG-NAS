@@ -172,8 +172,18 @@ def run_nasbench201_evaluation(seed: int = 42) -> dict:
         in16_valid = evaluator.evaluate(best_arch_str, dataset="ImageNet16-120", metric="x-valid")
         in16_test = evaluator.evaluate(best_arch_str, dataset="ImageNet16-120", metric="x-test")
 
+        # ── Selection-protocol metadata ─────────────────────────────────────
+        # Search used CIFAR-100 *validation* accuracy as fitness signal.
+        # The architecture was committed BEFORE querying any test numbers.
+        # Multi-dataset test results are read from the benchmark table AFTER
+        # commitment — they are not used for selection.
+        SEARCH_DATASET = "cifar100"
+        SEARCH_METRIC  = "x-valid"
+
         print("========================================================================")
         print("  FINAL NAS-BENCH-201 RESULTS")
+        print(f"  Selection protocol: fitness = {SEARCH_DATASET} / {SEARCH_METRIC}")
+        print("  Test numbers are lookup-only; they do NOT influence selection.")
         print("========================================================================")
         print(f" Method          | CIFAR-10      | CIFAR-100     | ImageNet-16-120")
         print(f"                 | valid | test  | valid | test  | valid | test")
@@ -181,13 +191,13 @@ def run_nasbench201_evaluation(seed: int = 42) -> dict:
         row = f" RAG-NAS (Qwen)  | {cifar10_valid:5.2f} | {cifar10_test:5.2f} | {cifar100_valid:5.2f} | {cifar100_test:5.2f} | {in16_valid:5.2f} | {in16_test:5.2f}"
         print(row)
         print("========================================================================")
+        print(f"  Best arch : {best_arch_str}")
+        print(f"  Seed      : {seed}")
 
-        # Output to CSV
-        output_csv = os.path.join(PROJECT_ROOT, "experiments", "results_nasbench201.csv")
-        os.makedirs(os.path.dirname(output_csv), exist_ok=True)
-        
         trial_metrics = {
             "seed": seed,
+            "search_dataset": SEARCH_DATASET,
+            "search_metric":  SEARCH_METRIC,
             "best_arch": best_arch_str,
             "cifar10_valid": cifar10_valid,
             "cifar10_test": cifar10_test,
@@ -239,8 +249,14 @@ if __name__ == "__main__":
         m = all_metrics[0]
         output_csv = os.path.join(PROJECT_ROOT, "experiments", "results_nasbench201.csv")
         os.makedirs(os.path.dirname(output_csv), exist_ok=True)
+        # Include search_dataset / search_metric so readers can verify the
+        # selection protocol.  The test columns are lookup-only; they are NOT
+        # used for selection and do NOT contaminate the search procedure.
         row = {
-            "Methods": f"RAG-NAS (seed={m['seed']})",
+            "Methods":           f"RAG-NAS (seed={m['seed']})",
+            "search_dataset":    m["search_dataset"],
+            "search_metric":     m["search_metric"],
+            "best_arch":         m["best_arch"],
             "CIFAR-10 valid":         f"{m['cifar10_valid']:.2f}",
             "CIFAR-10 test":          f"{m['cifar10_test']:.2f}",
             "CIFAR-100 valid":        f"{m['cifar100_valid']:.2f}",
@@ -264,9 +280,12 @@ if __name__ == "__main__":
         )
         os.makedirs(os.path.dirname(output_csv), exist_ok=True)
 
-        # Write one row per trial + a summary row
+        # Write one row per trial + a summary row.
+        # search_dataset and search_metric are identical across all trials
+        # (validation fitness); included for traceability.
         fieldnames = [
             "Methods",
+            "search_dataset", "search_metric", "best_arch",
             "CIFAR-10 valid", "CIFAR-10 test",
             "CIFAR-100 valid", "CIFAR-100 test",
             "ImageNet-16-120 valid", "ImageNet-16-120 test",
@@ -277,6 +296,9 @@ if __name__ == "__main__":
             for m in all_metrics:
                 writer.writerow({
                     "Methods":               f"RAG-NAS (seed={m['seed']})",
+                    "search_dataset":        m["search_dataset"],
+                    "search_metric":         m["search_metric"],
+                    "best_arch":             m["best_arch"],
                     "CIFAR-10 valid":        f"{m['cifar10_valid']:.2f}",
                     "CIFAR-10 test":         f"{m['cifar10_test']:.2f}",
                     "CIFAR-100 valid":       f"{m['cifar100_valid']:.2f}",
@@ -286,7 +308,10 @@ if __name__ == "__main__":
                 })
             # Summary row
             writer.writerow({
-                "Methods": f"RAG-NAS mean±std ({args.trials} trials)",
+                "Methods":        f"RAG-NAS mean±std ({args.trials} trials)",
+                "search_dataset": all_metrics[0]["search_dataset"],
+                "search_metric":  all_metrics[0]["search_metric"],
+                "best_arch":      "—",
                 "CIFAR-10 valid":
                     f"{agg['cifar10_valid']['mean']:.2f}±{agg['cifar10_valid']['std']:.2f}",
                 "CIFAR-10 test":

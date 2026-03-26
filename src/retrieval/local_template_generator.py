@@ -142,5 +142,7 @@ class LocalTemplateGenerator:
             print(content[:2000])
             return []
 
-        from src.retrieval.llm_template_generator import _validate_template
-        return [_validate_template(t) for t in raw if isinstance(t, dict)]
+        from src.retrieval.llm_template_generator import _validate_template, _print_validation_summary
+        validated = [_validate_template(t) for t in raw if isinstance(t, dict)]
+        _print_validation_summary(validated)
+        return validated

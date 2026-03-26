@@ -104,6 +104,7 @@ def _validate_template(template: Dict[str, Any]) -> Dict[str, Any]:
 
     # --- op_prior ---
     op_prior = micro_nb201.get("op_prior", {})
+    _uniform = {op: 1.0 / len(NB201_OPS) for op in NB201_OPS}
     if op_prior:
         unknown_ops = [k for k in op_prior if k not in NB201_OPS]
         if unknown_ops:
@@ -111,7 +112,12 @@ def _validate_template(template: Dict[str, Any]) -> Dict[str, Any]:
         op_prior = {k: v for k, v in op_prior.items() if k in NB201_OPS}
         if not op_prior:
             print("[Template Warning] op_prior empty after filtering; using uniform prior.")
-        micro_nb201["op_prior"] = _normalize_prior(op_prior) if op_prior else {op: 1.0 / len(NB201_OPS) for op in NB201_OPS}
+            op_prior = _uniform
+        micro_nb201["op_prior"] = _normalize_prior(op_prior)
+    else:
+        # op_prior missing or empty — apply uniform prior as fallback
+        print("[Template Warning] op_prior missing/empty; using uniform prior.")
+        micro_nb201["op_prior"] = _uniform
 
     # --- edge_prior ---
     edge_prior = micro_nb201.get("edge_prior", {})
@@ -159,6 +165,85 @@ def build_context_text(hits: List[Dict[str, Any]]) -> str:
         lines.append(f"    summary: {h.get('context_text')}")
         lines.append("")
     return "\n".join(lines)
+
+
+def _print_validation_summary(templates: List[Dict[str, Any]]) -> None:
+    """Print a human-readable post-generation validation summary.
+
+    This summary is intended to surface grounding gaps before the templates
+    are consumed by the EA, so the researcher can judge whether the LLM
+    output is usable.  Issues logged here should be addressed — they are not
+    automatically corrected.
+    """
+    print("\n" + "─" * 60)
+    print(f"  Template Validation Summary ({len(templates)} template(s))")
+    print("─" * 60)
+    for i, t in enumerate(templates, 1):
+        paradigm = t.get("paradigm", f"template_{i}")
+        micro = t.get("micro", {}).get("nb201", {})
+        op_prior = micro.get("op_prior", {})
+        edge_prior = micro.get("edge_prior", {})
+        constraints = micro.get("constraints", [])
+        evidence = t.get("evidence", [])
+        macro_constraints = t.get("macro", {}).get("constraints", [])
+
+        issues = []
+
+        # 1. Evidence grounding
+        if not evidence:
+            issues.append("no evidence citations — template is not grounded in retrieved docs")
+        else:
+            for ev in evidence:
+                if not ev.get("why"):
+                    issues.append(f"evidence entry missing 'why' field: {ev.get('doc_id', '?')}")
+
+        # 2. op_prior sanity
+        if op_prior:
+            total = sum(op_prior.values())
+            if abs(total - 1.0) > 1e-4:
+                issues.append(f"op_prior sums to {total:.4f} (expected 1.0; was renormalized)")
+            zero_prob_ops = [k for k, v in op_prior.items() if v <= 0]
+            if zero_prob_ops:
+                issues.append(f"op_prior has zero-probability ops: {zero_prob_ops}")
+        else:
+            issues.append("op_prior missing — EA will use uniform distribution")
+
+        # 3. constraint sanity
+        for c in constraints:
+            if c.get("type") == "max_count":
+                op, val = c.get("op", "?"), c.get("value", 0)
+                if val >= 6:
+                    issues.append(f"max_count constraint on '{op}' = {val} (≥6 edges: effectively unconstrained)")
+            if c.get("type") == "min_count":
+                op, val = c.get("op", "?"), c.get("value", 0)
+                if val > 6:
+                    issues.append(f"min_count constraint on '{op}' = {val} (>6 edges: unsatisfiable)")
+
+        # 4. macro forbidden_pair (not enforced by EA)
+        forbidden = [c for c in macro_constraints if c.get("type") == "forbidden_pair"]
+        if forbidden:
+            issues.append(
+                f"{len(forbidden)} macro forbidden_pair constraint(s) are NOT enforced by EA "
+                "(micro-cell mutation ignores macro constraints)"
+            )
+
+        # 5. edge_prior coverage
+        nb201_edges = {"0->1", "0->2", "1->2", "0->3", "1->3", "2->3"}
+        if edge_prior:
+            covered = set(edge_prior.keys()) & nb201_edges
+            if len(covered) < len(nb201_edges):
+                missing = nb201_edges - covered
+                issues.append(f"edge_prior covers only {len(covered)}/6 edges; missing: {sorted(missing)}")
+
+        status = "✓ OK" if not issues else f"⚠  {len(issues)} issue(s)"
+        print(f"  [{i}] {paradigm:<30}  {status}")
+        for iss in issues:
+            print(f"       - {iss}")
+
+    print("─" * 60)
+    print("  Note: templates with unresolved issues may reduce search quality.")
+    print("  Unenforced constraints should be reflected in paper limitations.")
+    print("─" * 60 + "\n")
 
 
 class TemplateGenerator:
@@ -223,6 +308,7 @@ class TemplateGenerator:
         validated = [_validate_template(t) for t in raw_templates if isinstance(t, dict)]
         if len(validated) < len(raw_templates):
             print(f"[Template Warning] {len(raw_templates) - len(validated)} template(s) dropped (non-dict).")
+        _print_validation_summary(validated)
         return validated
 
 

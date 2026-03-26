@@ -444,8 +444,14 @@ def run_evaluation(
     category_scores: Dict[str, List[float]] = {cat: [] for cat in MIEB_CATEGORIES}
     # Track how many tasks were expected vs run per category for the coverage report
     category_total: Dict[str, int] = {cat: 0 for cat in MIEB_CATEGORIES}
-    skipped_tasks: List[str] = []
-    failed_tasks: List[str] = []
+    # Three separate task-status buckets (important for honest reporting):
+    #   broken_tasks      — known permanently unavailable (HF dataset removed/ungated)
+    #   gated_tasks       — would work with HF authentication; currently skipped
+    #   runtime_failed    — unexpected errors during evaluation
+    broken_tasks: List[str] = []
+    gated_tasks: List[str] = []
+    runtime_failed: List[str] = []
+    evaluated_tasks: List[str] = []
 
     if tasks and tasks[0] == "quick":
         # Quick evaluation mode — uses a fixed representative subset per category.
@@ -465,14 +471,15 @@ def run_evaluation(
                             break
                     if score is not None:
                         category_scores[cat].append(score)
+                        evaluated_tasks.append(tname)
                         print(f"  ✓ [{cat}] {tname}: {score:.4f}")
                     else:
                         category_scores[cat].append(0.0)
-                        failed_tasks.append(tname)
+                        runtime_failed.append(tname)
                         print(f"  ✗ [{cat}] {tname}: score extraction failed (counted as 0)")
                 except Exception as e:
                     category_scores[cat].append(0.0)
-                    failed_tasks.append(tname)
+                    runtime_failed.append(tname)
                     print(f"  ✗ [{cat}] {tname}: {e} (counted as 0)")
     else:
         # Full benchmark evaluation.
@@ -521,10 +528,10 @@ def run_evaluation(
                 cat = TASK_TYPE_TO_CATEGORY.get(str(tt), "")
 
                 if task_name in _known_broken:
-                    print(f"\n[{idx}/{len(mteb_tasks)}] ⊗ Known broken dataset: {task_name} (counted as 0)")
+                    print(f"\n[{idx}/{len(mteb_tasks)}] ⊗ Permanently unavailable: {task_name} (counted as 0)")
                     if cat:
                         category_scores[cat].append(0.0)
-                    failed_tasks.append(task_name)
+                    broken_tasks.append(task_name)
                     continue
 
                 print(f"\n[{idx}/{len(mteb_tasks)}] Evaluating: {task_name}")
@@ -539,10 +546,11 @@ def run_evaluation(
 
                     if score is not None and cat:
                         category_scores[cat].append(score)
+                        evaluated_tasks.append(task_name)
                         print(f"  ✓ Score: {score:.4f} ({metric_key})")
                     elif cat:
                         category_scores[cat].append(0.0)
-                        failed_tasks.append(task_name)
+                        runtime_failed.append(task_name)
                         print(f"  ✗ Score extraction failed — counted as 0.0")
 
                 except Exception as e:
@@ -551,20 +559,19 @@ def run_evaluation(
                         "gated dataset" in error_msg.lower()
                         or "must be authenticated" in error_msg.lower()
                         or "access to its metadata" in error_msg.lower()
-                        or "repository" in error_msg.lower() and "private" in error_msg.lower()
+                        or ("repository" in error_msg.lower() and "private" in error_msg.lower())
                     )
                     if is_gated and skip_gated:
                         print(
-                            f"  ⊗ Gated dataset — requires HF token (counted as 0): {task_name}\n"
+                            f"  ⊗ Gated (requires HF token, counted as 0): {task_name}\n"
                             f"    Fix: huggingface-cli login  (then re-run with --no-skip-gated)"
                         )
-                        skipped_tasks.append(task_name)
+                        gated_tasks.append(task_name)
                     else:
-                        # Print full error to make it easy to diagnose batch-format issues
-                        print(f"  ✗ Error (counted as 0): {task_name}")
+                        print(f"  ✗ Runtime error (counted as 0): {task_name}")
                         print(f"    {error_msg[:300]}")
-                        failed_tasks.append(task_name)
-                    # Skipped/failed tasks count as 0 in the denominator
+                        runtime_failed.append(task_name)
+                    # All non-evaluated tasks count as 0 in denominator
                     if cat:
                         category_scores[cat].append(0.0)
 
@@ -573,17 +580,35 @@ def run_evaluation(
             import traceback
             traceback.print_exc()
 
-    # Print summary of skipped/failed tasks
-    if skipped_tasks:
-        print(f"\n⊗ Skipped {len(skipped_tasks)} gated dataset(s):")
-        for t in skipped_tasks:
-            print(f"  - {t}")
-    if failed_tasks:
-        print(f"\n✗ Failed/broken {len(failed_tasks)} task(s):")
-        for t in failed_tasks:
-            print(f"  - {t}")
+    # ── Task-status summary ──────────────────────────────────────────────────
+    n_total_all = sum(category_total.values())
+    n_evaluated = len(evaluated_tasks)
+    n_broken    = len(broken_tasks)
+    n_gated     = len(gated_tasks)
+    n_runtime   = len(runtime_failed)
+    coverage    = n_evaluated / n_total_all if n_total_all else 0.0
 
-    # Compute category averages over the FULL expected task count (correct denominator).
+    print("\n" + "─" * 72)
+    print("  Task-status breakdown")
+    print("─" * 72)
+    print(f"  Total tasks in {benchmark_variant}    : {n_total_all}")
+    print(f"  Successfully evaluated              : {n_evaluated}")
+    print(f"  Permanently unavailable (broken)    : {n_broken}")
+    if broken_tasks:
+        for t in broken_tasks:
+            print(f"      • {t}")
+    print(f"  Gated (need HF token; skipped)      : {n_gated}")
+    if gated_tasks:
+        for t in gated_tasks:
+            print(f"      • {t}  (fix: huggingface-cli login + --no-skip-gated)")
+    print(f"  Runtime failures                    : {n_runtime}")
+    if runtime_failed:
+        for t in runtime_failed:
+            print(f"      • {t}")
+    print(f"  Coverage ratio                      : {n_evaluated}/{n_total_all} = {coverage:.1%}")
+    print("─" * 72)
+
+    # ── Category averages over FULL expected task count (correct denominator) ──
     result_row = {"Model": model_name}
     all_scores: List[float] = []
 
@@ -591,12 +616,9 @@ def run_evaluation(
         scores = category_scores[cat]
         n_total = category_total[cat]
         if n_total == 0:
-            # Category not present in this benchmark variant
             result_row[cat] = "—"
             result_row[f"{cat} (N_run/N_total)"] = "—"
         else:
-            # Pad with zeros for any expected tasks that were never attempted
-            # (e.g., benchmark loading failed before the per-task loop)
             while len(scores) < n_total:
                 scores.append(0.0)
             avg = float(np.mean(scores)) * 100
@@ -605,21 +627,54 @@ def run_evaluation(
             result_row[f"{cat} (N_run/N_total)"] = f"{n_run}/{n_total}"
             all_scores.extend(scores)
 
-    # Overall score: labelled after the benchmark variant to avoid confusion
-    # between MIEB and MIEB-lite (they have different task sets and cannot share
-    # a single number).
-    overall_key = benchmark_variant  # e.g., "MIEB-lite" or "MIEB"
+    # ── Overall score label ──────────────────────────────────────────────────
+    # IMPORTANT: This score is NOT the official {benchmark_variant} score.
+    # It is an accessible-subset aggregate computed over tasks that could be
+    # evaluated (broken and gated tasks are counted as 0.0 in the denominator).
+    # Only use "official {benchmark_variant}" in claims if coverage == 100%.
+    # The column is explicitly labelled to prevent misrepresentation.
+    if coverage >= 0.999:
+        # Full coverage — may legitimately call it the benchmark score
+        overall_key = benchmark_variant
+        score_label_note = "(full coverage — comparable to paper)"
+    else:
+        # Partial coverage — must not claim it is the official benchmark score
+        overall_key = f"{benchmark_variant}-accessible-subset"
+        score_label_note = (
+            f"NOT comparable to official {benchmark_variant} "
+            f"({n_evaluated}/{n_total_all} tasks evaluated; "
+            f"{n_broken} broken, {n_gated} gated, {n_runtime} failed)"
+        )
+
     if all_scores:
         result_row[overall_key] = f"{float(np.mean(all_scores)) * 100:.1f}"
     else:
         result_row[overall_key] = "—"
 
-    _print_table(result_row, benchmark_variant=benchmark_variant)
+    # Store task-status metadata in the result row for the CSV
+    result_row["tasks_total"]            = str(n_total_all)
+    result_row["tasks_evaluated"]        = str(n_evaluated)
+    result_row["tasks_broken"]           = str(n_broken)
+    result_row["tasks_gated"]            = str(n_gated)
+    result_row["tasks_failed_runtime"]   = str(n_runtime)
+    result_row["coverage_ratio"]         = f"{coverage:.3f}"
+    result_row["score_label_note"]       = score_label_note
+
+    _print_table(result_row, benchmark_variant=benchmark_variant,
+                 overall_key=overall_key, score_label_note=score_label_note)
 
     if output_path:
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-        coverage_cols = [f"{cat} (N_run/N_total)" for cat in MIEB_CATEGORIES]
-        fieldnames = ["Model"] + MIEB_CATEGORIES + coverage_cols + [overall_key]
+        coverage_cols   = [f"{cat} (N_run/N_total)" for cat in MIEB_CATEGORIES]
+        metadata_cols   = [
+            "tasks_total", "tasks_evaluated", "tasks_broken",
+            "tasks_gated", "tasks_failed_runtime", "coverage_ratio",
+            "score_label_note",
+        ]
+        fieldnames = (
+            ["Model"] + MIEB_CATEGORIES + coverage_cols
+            + [overall_key] + metadata_cols
+        )
         with open(output_path, "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
             writer.writeheader()
@@ -694,13 +749,22 @@ def _get_task_type(result) -> str:
         return ""
 
 
-def _print_table(row: Dict[str, str], benchmark_variant: str = "MIEB-lite"):
-    """Pretty-print results in Paper Table 2 format."""
+def _print_table(
+    row: Dict[str, str],
+    benchmark_variant: str = "MIEB-lite",
+    overall_key: str = "",
+    score_label_note: str = "",
+):
+    """Pretty-print results in Paper Table 2 format with coverage disclaimer."""
+    overall_key = overall_key or benchmark_variant
     print("\n" + "=" * 100)
-    print(f"MIEB Benchmark Results — {benchmark_variant} (Paper Table 2 Format)")
+    print(f"MIEB Evaluation Results — {benchmark_variant} (Paper Table 2 Format)")
+    if score_label_note:
+        # Prominent disclaimer so no one mistakes a partial run for the official score
+        print(f"  ⚠  Score column '{overall_key}': {score_label_note}")
     print("=" * 100)
 
-    cols = ["Model"] + MIEB_CATEGORIES + [benchmark_variant]
+    cols = ["Model"] + MIEB_CATEGORIES + [overall_key]
     widths = [max(len(c), len(str(row.get(c, "—")))) + 2 for c in cols]
 
     header = " | ".join(c.center(w) for c, w in zip(cols, widths))

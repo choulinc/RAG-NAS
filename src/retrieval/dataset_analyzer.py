@@ -374,40 +374,53 @@ class DatasetAnalyzer:
         dir_info: Dict[str, Any],
         root: Path,
     ) -> str:
-        # 1. Explicit metadata hint
+        """Heuristic task inference.  Logs which signal triggered the decision
+        so callers can verify the output is reasonable.
+        """
+        # 1. Explicit metadata hint (data.yaml "task" field — highest confidence)
         task_hint = meta.get("task_hint", "")
         if task_hint:
             for kw, task in TASK_KEYWORDS.items():
                 if kw in task_hint:
+                    print(f"[DatasetAnalyzer] task='{task}' ← metadata hint '{task_hint}'")
                     return task
 
-        # 2. README keyword matching
+        # 2. README keyword matching (medium confidence)
         if readme_text:
             rl = readme_text.lower()
             for kw, task in TASK_KEYWORDS.items():
                 if kw in rl:
+                    print(f"[DatasetAnalyzer] task='{task}' ← README keyword '{kw}'")
                     return task
 
         # 3. Mask directory → segmentation
         if dir_info.get("has_masks_dir"):
+            print(f"[DatasetAnalyzer] task='Image Segmentation' ← mask directory found")
             return "Image Segmentation"
 
         # 4. Annotation directory → detection (check for COCO json or VOC xml)
         if dir_info.get("has_annotations_dir"):
             if self._has_detection_annotations(root):
+                print(f"[DatasetAnalyzer] task='Object Detection' ← annotation files found")
                 return "Object Detection"
 
         # 5. Class subdirectories → classification
         if dir_info.get("has_class_subdirs"):
+            print(f"[DatasetAnalyzer] task='Image Classification' ← class subdirectory pattern")
             return "Image Classification"
 
         # 6. Folder name hints
         root_name = root.name.lower()
         for kw, task in TASK_KEYWORDS.items():
             if kw in root_name:
+                print(f"[DatasetAnalyzer] task='{task}' ← folder name keyword '{kw}'")
                 return task
 
-        # Default
+        # 7. Fallback — low confidence; reviewers should verify
+        print(
+            f"[DatasetAnalyzer] task='Image Classification' ← FALLBACK (no signal found). "
+            f"Review the returned DatasetProfile before trusting downstream results."
+        )
         return "Image Classification"
 
     @staticmethod

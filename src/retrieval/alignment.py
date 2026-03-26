@@ -471,10 +471,25 @@ def main():
     ap.add_argument("--output", default="checkpoints/aligned_encoder.pt",
                     help="Output checkpoint path")
     ap.add_argument("--num_workers", type=int, default=4)
+    ap.add_argument("--seed", type=int, default=42,
+                    help="Global random seed for Python / NumPy / PyTorch (default: 42). "
+                         "Record this value alongside any reported results.")
     args = ap.parse_args()
 
     if args.device == "auto":
         args.device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # ── Seed everything for reproducibility ─────────────────────────────────
+    import random as _random
+    import numpy as _np
+    _random.seed(args.seed)
+    _np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    print(f"[Seed] Global seed set to {args.seed} (Python / NumPy / PyTorch)")
 
     # Load frozen image encoder
     from src.retrieval.contrastive_encoder import ContrastiveTrainer
@@ -527,6 +542,7 @@ def main():
             "epochs": args.epochs,
             "batch_size": args.batch_size,
             "lr": args.lr,
+            "seed": args.seed,   # Record for reproducibility
         },
         "n_pairs": len(dataset),
         "history": trainer.history,

@@ -313,13 +313,21 @@ def train(
     clean: bool = False,
     use_decoder: bool = False,
     recon_weight: float = 0.5,
+    seed: int = 42,
 ):
     """Full training pipeline."""
+
+    # ── Seed (for internal reproducibility when called programmatically) ─────
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
     # Device
     if device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"\nDevice: {device}")
+    print(f"\nDevice: {device}  |  seed: {seed}")
 
     # ─── Step 1: Collect all datasets ───
     data_root = Path("data/NAS-Bench/cifar_images")
@@ -529,6 +537,7 @@ def train(
     log_data = {
         "timestamp": timestamp,
         "config": {
+            "seed": seed,   # Record for reproducibility
             "epochs": epochs,
             "batch_size": batch_size,
             "lr": lr,
@@ -599,7 +608,20 @@ def main():
                     help="Enable reconstruction decoder for regularization")
     ap.add_argument("--recon_weight", type=float, default=0.5,
                     help="Weight for reconstruction loss (default: 0.5)")
+    ap.add_argument("--seed", type=int, default=42,
+                    help="Global random seed for Python / NumPy / PyTorch (default: 42). "
+                         "Record alongside results for reproducibility.")
     args = ap.parse_args()
+
+    # ── Seed everything ──────────────────────────────────────────────────────
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    print(f"[Seed] Global seed set to {args.seed} (Python / NumPy / PyTorch)")
 
     train(
         dataset_name=args.dataset,
@@ -621,6 +643,7 @@ def main():
         clean=args.clean,
         use_decoder=args.use_decoder,
         recon_weight=args.recon_weight,
+        seed=args.seed,
     )
 
 
