@@ -1,0 +1,2 @@
+Methods,CIFAR-10 valid,CIFAR-10 test,CIFAR-100 valid,CIFAR-100 test,ImageNet-16-120 valid,ImageNet-16-120 test
+RAG-NAS (Qwen),91.55,91.25,73.49,73.51,46.37,46.34
