@@ -12,7 +12,10 @@ import sys
 sys.path.append(str(Path(__file__).parent.parent))
 
 from src.retrieval.dataset_analyzer import DatasetAnalyzer
-from src.retrieval.contrastive_encoder import SiameseEncoder, ContrastiveLoss, ContrastivePairDataset
+from src.retrieval.contrastive_encoder import (
+    SiameseEncoder, ContrastiveLoss, ContrastivePairDataset,
+    ImageDecoder, CombinedLoss,
+)
 from src.retrieval.multimodal_retrieve import MultiModalRetriever
 
 def create_dummy_image(path: Path):
@@ -151,6 +154,52 @@ def test_multimodal_retriever(mock_text_retrieve, mock_datasets, tmp_path):
     # Since there's no feature store initialized, image scores won't be calculated
     assert hit.get("image_score") == 0.0
     # Also verify alpha adjustment worked and hit holds multimodal scores
+
+def test_decoder_forward():
+    """ImageDecoder produces correct output shape."""
+    decoder = ImageDecoder(embed_dim=16)
+    decoder.eval()
+    embedding = torch.randn(2, 16)
+    out = decoder(embedding)
+    assert out.shape == (2, 3, 32, 32), f"Expected (2,3,32,32), got {out.shape}"
+    # Output should be in [0, 1] due to Sigmoid
+    assert out.min() >= 0.0
+    assert out.max() <= 1.0
+
+def test_combined_loss():
+    """CombinedLoss computes scalar loss with reconstruction terms."""
+    contrastive = ContrastiveLoss()
+    combined = CombinedLoss(contrastive, contrastive_weight=1.0, recon_weight=0.5)
+
+    v1 = torch.randn(4, 16)
+    v2 = torch.randn(4, 16)
+    y = torch.tensor([1.0, 0.0, 1.0, 0.0])
+    recon1 = torch.rand(4, 3, 32, 32)
+    orig1 = torch.rand(4, 3, 32, 32)
+    recon2 = torch.rand(4, 3, 32, 32)
+    orig2 = torch.rand(4, 3, 32, 32)
+
+    loss = combined(v1, v2, y, recon1, orig1, recon2, orig2)
+    assert loss.dim() == 0, "Loss should be scalar"
+    assert not torch.isnan(loss)
+
+    # Without recon it should still work (falls back to contrastive only)
+    loss_no_recon = combined(v1, v2, y)
+    assert loss_no_recon.dim() == 0
+
+def test_encoder_decoder_roundtrip():
+    """Encode → Decode pipeline has correct shapes."""
+    encoder = SiameseEncoder(pretrained=False, embed_dim=16)
+    decoder = ImageDecoder(embed_dim=16)
+    encoder.eval()
+    decoder.eval()
+
+    imgs = torch.randn(2, 3, 32, 32)
+    embeddings = encoder(imgs)
+    assert embeddings.shape == (2, 16)
+
+    reconstructed = decoder(embeddings)
+    assert reconstructed.shape == (2, 3, 32, 32)
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])

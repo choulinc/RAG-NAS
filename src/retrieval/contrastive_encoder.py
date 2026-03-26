@@ -84,6 +84,62 @@ class ContrastiveLoss(nn.Module):
         return loss.mean()
 
 
+class CombinedLoss(nn.Module):
+    """
+    Joint loss: contrastive + reconstruction.
+
+    L_total = λ_c · L_contrastive + λ_r · L_reconstruction
+
+    Reconstruction loss uses MSE between the original image and the
+    decoder output, encouraging the embedding to retain fine-grained
+    visual details.
+    """
+
+    def __init__(
+        self,
+        contrastive_loss: ContrastiveLoss,
+        contrastive_weight: float = 1.0,
+        recon_weight: float = 0.5,
+    ):
+        super().__init__()
+        self.contrastive_loss = contrastive_loss
+        self.contrastive_weight = contrastive_weight
+        self.recon_weight = recon_weight
+        self.mse = nn.MSELoss()
+
+    def forward(
+        self,
+        v1: torch.Tensor,
+        v2: torch.Tensor,
+        y: torch.Tensor,
+        recon1: Optional[torch.Tensor] = None,
+        orig1: Optional[torch.Tensor] = None,
+        recon2: Optional[torch.Tensor] = None,
+        orig2: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        Args:
+            v1, v2: (B, D) embeddings
+            y: (B,) labels
+            recon1, orig1: reconstructed and original images for arm 1
+            recon2, orig2: reconstructed and original images for arm 2
+
+        Returns:
+            Scalar combined loss.
+        """
+        loss_c = self.contrastive_loss(v1, v2, y)
+        loss = self.contrastive_weight * loss_c
+
+        if recon1 is not None and orig1 is not None:
+            loss_r1 = self.mse(recon1, orig1)
+            loss += self.recon_weight * loss_r1
+        if recon2 is not None and orig2 is not None:
+            loss_r2 = self.mse(recon2, orig2)
+            loss += self.recon_weight * loss_r2
+
+        return loss
+
+
 # ---------------------------------------------------------------------------
 # Siamese Encoder
 # ---------------------------------------------------------------------------
@@ -143,6 +199,66 @@ class SiameseEncoder(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Convenience: encode two images through the shared encoder."""
         return self.forward(x1), self.forward(x2)
+
+
+# ---------------------------------------------------------------------------
+# Image Decoder
+# ---------------------------------------------------------------------------
+
+class ImageDecoder(nn.Module):
+    """
+    Decoder that reconstructs images from compact embeddings.
+
+    Architecture: embed_dim → FC → Reshape → ConvTranspose2d layers → (3, 32, 32)
+
+    Used as a reconstruction regularizer during contrastive training
+    to encourage the encoder to retain fine-grained visual details.
+    """
+
+    def __init__(self, embed_dim: int = 128, image_size: int = 32):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.image_size = image_size
+
+        # FC: embed_dim → 512 * 2 * 2 = 2048
+        self.fc = nn.Sequential(
+            nn.Linear(embed_dim, 256),
+            nn.ReLU(inplace=True),
+            nn.Linear(256, 512 * 2 * 2),
+            nn.ReLU(inplace=True),
+        )
+
+        # Transposed convolutions: (512, 2, 2) → (3, 32, 32)
+        self.deconv = nn.Sequential(
+            # (512, 2, 2) → (256, 4, 4)
+            nn.ConvTranspose2d(512, 256, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+            # (256, 4, 4) → (128, 8, 8)
+            nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+            # (128, 8, 8) → (64, 16, 16)
+            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            # (64, 16, 16) → (3, 32, 32)
+            nn.ConvTranspose2d(64, 3, kernel_size=4, stride=2, padding=1),
+            nn.Sigmoid(),  # output in [0, 1]
+        )
+
+    def forward(self, embedding: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            embedding: (B, embed_dim) — L2-normalized embedding from encoder
+
+        Returns:
+            (B, 3, image_size, image_size) reconstructed image in [0, 1]
+        """
+        x = self.fc(embedding)          # (B, 512*2*2)
+        x = x.view(-1, 512, 2, 2)      # (B, 512, 2, 2)
+        x = self.deconv(x)              # (B, 3, 32, 32)
+        return x
 
 
 # ---------------------------------------------------------------------------
@@ -242,28 +358,39 @@ class ContrastiveTrainer:
     """
     Training pipeline for the Siamese contrastive encoder.
 
+    Optionally trains with an ImageDecoder for reconstruction regularization.
+
     Usage:
         trainer = ContrastiveTrainer(encoder, loss_fn, task_to_images)
         trainer.train(epochs=50)
         trainer.save_checkpoint("checkpoints/encoder.pt")
+
+        # With decoder:
+        decoder = ImageDecoder(embed_dim=128)
+        combined = CombinedLoss(loss_fn, recon_weight=0.5)
+        trainer = ContrastiveTrainer(encoder, combined, task_to_images, decoder=decoder)
     """
 
     def __init__(
         self,
         encoder: SiameseEncoder,
-        loss_fn: ContrastiveLoss,
+        loss_fn: nn.Module,
         task_to_images: Dict[str, List[str]],
         lr: float = 1e-4,
         batch_size: int = 64,
         pairs_per_epoch: int = 2000,
         image_size: int = 32,
         device: Optional[str] = None,
+        decoder: Optional["ImageDecoder"] = None,
     ):
         self.encoder = encoder
         self.loss_fn = loss_fn
+        self.decoder = decoder
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.encoder.to(self.device)
         self.loss_fn.to(self.device)
+        if self.decoder is not None:
+            self.decoder.to(self.device)
 
         self.dataset = ContrastivePairDataset(
             task_to_images=task_to_images,
@@ -273,7 +400,11 @@ class ContrastiveTrainer:
         self.loader = DataLoader(
             self.dataset, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=True
         )
-        self.optimizer = torch.optim.Adam(encoder.parameters(), lr=lr)
+        # Optimise both encoder and decoder params
+        params = list(encoder.parameters())
+        if self.decoder is not None:
+            params += list(self.decoder.parameters())
+        self.optimizer = torch.optim.Adam(params, lr=lr)
         self.history: List[float] = []
 
     def train(self, epochs: int = 50, log_every: int = 5) -> List[float]:
@@ -293,7 +424,18 @@ class ContrastiveTrainer:
                 labels = labels.to(self.device)
 
                 v1, v2 = self.encoder.encode_pair(img1, img2)
-                loss = self.loss_fn(v1, v2, labels)
+
+                if self.decoder is not None and isinstance(self.loss_fn, CombinedLoss):
+                    recon1 = self.decoder(v1)
+                    recon2 = self.decoder(v2)
+                    # Normalize originals to [0,1] for MSE (undo ImageNet normalization)
+                    mean = torch.tensor([0.4914, 0.4822, 0.4465], device=self.device).view(1, 3, 1, 1)
+                    std = torch.tensor([0.2023, 0.1994, 0.2010], device=self.device).view(1, 3, 1, 1)
+                    orig1_01 = (img1 * std + mean).clamp(0, 1)
+                    orig2_01 = (img2 * std + mean).clamp(0, 1)
+                    loss = self.loss_fn(v1, v2, labels, recon1, orig1_01, recon2, orig2_01)
+                else:
+                    loss = self.loss_fn(v1, v2, labels)
 
                 self.optimizer.zero_grad()
                 loss.backward()
@@ -311,18 +453,29 @@ class ContrastiveTrainer:
 
     def save_checkpoint(self, path: str):
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        torch.save(
-            {
-                "encoder_state": self.encoder.state_dict(),
-                "backbone": self.encoder.backbone_name,
-                "embed_dim": self.encoder.embed_dim,
-            },
-            path,
-        )
+        ckpt = {
+            "encoder_state": self.encoder.state_dict(),
+            "backbone": self.encoder.backbone_name,
+            "embed_dim": self.encoder.embed_dim,
+        }
+        if self.decoder is not None:
+            ckpt["decoder_state"] = self.decoder.state_dict()
+        torch.save(ckpt, path)
         print(f"Saved checkpoint → {path}")
 
     @staticmethod
-    def load_checkpoint(path: str, device: Optional[str] = None) -> SiameseEncoder:
+    def load_checkpoint(
+        path: str,
+        device: Optional[str] = None,
+        load_decoder: bool = False,
+    ) -> "SiameseEncoder | Tuple[SiameseEncoder, ImageDecoder]":
+        """Load encoder (and optionally decoder) from checkpoint.
+
+        Returns:
+            SiameseEncoder if load_decoder is False.
+            (SiameseEncoder, ImageDecoder) if load_decoder is True and
+            decoder state is present in the checkpoint.
+        """
         device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         ckpt = torch.load(path, map_location=device, weights_only=False)
         encoder = SiameseEncoder(
@@ -333,6 +486,14 @@ class ContrastiveTrainer:
         encoder.load_state_dict(ckpt["encoder_state"])
         encoder.to(device)
         encoder.eval()
+
+        if load_decoder and "decoder_state" in ckpt:
+            decoder = ImageDecoder(embed_dim=ckpt["embed_dim"])
+            decoder.load_state_dict(ckpt["decoder_state"])
+            decoder.to(device)
+            decoder.eval()
+            return encoder, decoder
+
         return encoder
 
 

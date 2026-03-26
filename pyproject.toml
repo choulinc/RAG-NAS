@@ -34,4 +34,17 @@ dependencies = [
   "torchvision>=0.15.0",
   "Pillow>=10.0.0",
   "pytest>=9.0.2",
+  "mteb>=2.11.10",
+  "huggingface-hub[cli]>=1.7.2",
 ]
+
+# Configure uv to download from the PyTorch nightly index for Blackwell (cu128) support
+[[tool.uv.index]]
+name = "pytorch-nightly"
+url = "https://download.pytorch.org/whl/nightly/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-nightly" }
+torchvision = { index = "pytorch-nightly" }
+torchaudio = { index = "pytorch-nightly" }

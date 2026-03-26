@@ -1,0 +1,145 @@
+================================================================================
+HOW TO RUN MIEB EVALUATION WITH GPU (NO SKIP GATED)
+================================================================================
+
+PROBLEM:
+Your .venv has broken CUDA libraries (missing libnvshmem_host.so.3 and others).
+Running from venv will keep failing with ImportError.
+
+SOLUTION:
+Exit venv and use conda base environment (which has working CUDA).
+
+================================================================================
+STEP-BY-STEP INSTRUCTIONS
+================================================================================
+
+1. EXIT THE VENV (if active):
+
+   deactivate
+
+   Your prompt should change from:
+   (base) (.venv) choulin@host:~/RAG-NAS$
+   to:
+   (base) choulin@host:~/RAG-NAS$
+
+   ⚠️  IMPORTANT: Make sure (.venv) is gone from your prompt!
+
+
+2. RUN THE EVALUATION:
+
+   cd /home/choulin/RAG-NAS
+   bash run_mieb.sh
+
+   This script will:
+   - Check PyTorch with CUDA works
+   - Install missing packages (mteb, datasets, etc.)
+   - Guide you through HuggingFace authentication if needed
+   - Run the full evaluation
+
+
+3. OR RUN MANUALLY:
+
+   deactivate  # exit venv
+   cd /home/choulin/RAG-NAS
+
+   # Check PyTorch works:
+   python -c "import torch; print(torch.cuda.is_available())"
+   # Should print: True
+
+   # Install dependencies if needed:
+   pip install mteb datasets huggingface_hub
+
+   # Authenticate HuggingFace (first time only):
+   # 1. Visit: https://huggingface.co/datasets/facebook/winoground
+   # 2. Click "Request access"
+   # 3. Get token: https://huggingface.co/settings/tokens
+   huggingface-cli login  # paste token
+
+   # Run evaluation:
+   python experiments/mieb_eval.py \
+       --alignment_checkpoint checkpoints/aligned_encoder.pt \
+       --encoder_checkpoint checkpoints/contrastive_encoder_best.pt \
+       --device cuda \
+       --no-skip-gated
+
+
+================================================================================
+EXPECTED OUTPUT
+================================================================================
+
+📋 Total tasks to evaluate: 51
+
+[1/51] Evaluating: ImageNetDog15Clustering
+  ✓ Score: 0.6234 (v_measure)
+
+[2/51] Evaluating: Country211
+  ✓ Score: 0.7123 (accuracy)
+
+...
+
+[26/51] Evaluating: Winoground
+  ✓ Score: 0.5432 (accuracy)  ← This will work now!
+
+...
+
+[51/51] Evaluating: LastTask
+  ✓ Score: 0.6789 (ndcg_at_10)
+
+==========================================================================================
+MIEB Benchmark Results
+==========================================================================================
+         Model           | Retrieval | Clustering | ... | MIEB
+----------------------------------------------------------------------------------------
+ RAG-NAS-AlignedEncoder  |   65.4    |    72.1    | ... | 68.2
+==========================================================================================
+
+Results saved → experiments/results.csv
+
+
+TIME: ~2-3 hours on your RTX 5080
+
+
+================================================================================
+TROUBLESHOOTING
+================================================================================
+
+Q: Still getting "ImportError: libnvshmem_host.so.3"?
+A: You're still in the venv! Run 'deactivate' first.
+   Check your prompt - (.venv) should be gone.
+
+Q: "CUDA not available" when running from conda base?
+A: Install PyTorch with CUDA:
+   pip install torch torchvision
+   Or:
+   conda install pytorch torchvision torchaudio pytorch-cuda=12.4 -c pytorch -c nvidia
+
+Q: "Dataset 'facebook/winoground' is a gated dataset"?
+A: You need to authenticate:
+   1. Visit: https://huggingface.co/datasets/facebook/winoground
+   2. Click "Request access"
+   3. Run: huggingface-cli login
+
+Q: Want to skip gated datasets instead?
+A: Remove --no-skip-gated flag or add --skip-gated
+
+
+================================================================================
+QUICK REFERENCE
+================================================================================
+
+# Exit venv and run (easiest):
+deactivate
+cd /home/choulin/RAG-NAS
+bash run_mieb.sh
+
+# Manual run:
+deactivate
+cd /home/choulin/RAG-NAS
+python experiments/mieb_eval.py \
+    --alignment_checkpoint checkpoints/aligned_encoder.pt \
+    --encoder_checkpoint checkpoints/contrastive_encoder_best.pt \
+    --device cuda \
+    --no-skip-gated
+
+
+================================================================================

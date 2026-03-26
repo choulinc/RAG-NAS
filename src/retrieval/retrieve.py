@@ -59,16 +59,83 @@ def flatten_kv(x: Any, prefix: str = "") -> List[str]:
 
 
 # UIR -> views for retrieval
-def extract_primary_result(u: Dict[str, Any]) -> Tuple[Optional[str], Optional[str], Dict[str, Any]]:
+def extract_best_result(
+    u: Dict[str, Any],
+    query: str = "",
+    filters: Optional[Dict[str, Any]] = None,
+) -> Tuple[Optional[str], Optional[str], Dict[str, Any]]:
     """
-    Return (task, dataset, metrics) for the first result if exists.
-    You can later improve this by choosing the best-matching result per query.
+    Query-aware result selection (multi-aspect scoring).
+
+    Instead of blindly returning results[0], score each result entry
+    against the query and filters, then return the best match.
+
+    Scoring signals (inspired by multi-faceted document retrieval):
+      - Filter exact match on task / dataset        (+10 each)
+      - Query token overlap with task name           (+3)
+      - Query token overlap with dataset name        (+3)
+      - Query token overlap with metric keys         (+2)
+      - Positional prior (favour earlier entries)    (+0.1 * (N - i))
+
+    When *query* and *filters* are both empty the positional prior
+    dominates, so the function degrades to returning results[0]
+    — fully backward-compatible.
+
+    Returns:
+        (task, dataset, metrics) of the best-matching result entry,
+        or (None, None, {}) when no results exist.
     """
     results = u.get("results", []) or []
     if not results:
         return None, None, {}
-    r0 = results[0] or {}
-    return r0.get("task"), r0.get("dataset"), (r0.get("metrics", {}) or {})
+    if len(results) == 1:
+        r0 = results[0] or {}
+        return r0.get("task"), r0.get("dataset"), (r0.get("metrics", {}) or {})
+
+    q_tokens = set(tokenize(query)) if query else set()
+    filter_task = ((filters or {}).get("task") or "").lower()
+    filter_dataset = ((filters or {}).get("dataset") or "").lower()
+    n = len(results)
+
+    best_idx, best_score = 0, -1.0
+    for i, r in enumerate(results):
+        if not r:
+            continue
+        score = 0.0
+        r_task = (r.get("task") or "").lower()
+        r_dataset = (r.get("dataset") or "").lower()
+        r_metrics = r.get("metrics", {}) or {}
+
+        # 1. Filter exact match (strongest signal)
+        if filter_task and r_task == filter_task:
+            score += 10.0
+        if filter_dataset and r_dataset == filter_dataset:
+            score += 10.0
+
+        # 2. Query-token overlap with task / dataset
+        if q_tokens:
+            task_tokens = set(tokenize(r_task))
+            dataset_tokens = set(tokenize(r_dataset))
+            if q_tokens & task_tokens:
+                score += 3.0 * len(q_tokens & task_tokens)
+            if q_tokens & dataset_tokens:
+                score += 3.0 * len(q_tokens & dataset_tokens)
+
+            # 3. Metric key overlap
+            for mk in r_metrics:
+                if set(tokenize(str(mk))) & q_tokens:
+                    score += 2.0
+                    break  # one match is enough
+
+        # 4. Positional prior (weak tie-breaker)
+        score += 0.1 * (n - i)
+
+        if score > best_score:
+            best_score = score
+            best_idx = i
+
+    best = results[best_idx] or {}
+    return best.get("task"), best.get("dataset"), (best.get("metrics", {}) or {})
 
 
 def uir_to_views(u: Dict[str, Any]) -> Dict[str, str]:
@@ -309,7 +376,7 @@ def retrieve(
     kv_token_corpus: List[List[str]] = []
     for u in cand_uirs:
         views = uir_to_views(u)
-        task0, dataset0, metrics0 = extract_primary_result(u)
+        task0, dataset0, metrics0 = extract_best_result(u, query=query, filters=filters)
 
         kv_tokens = tokenize(views["kv"])
         kv_token_corpus.append(kv_tokens)
