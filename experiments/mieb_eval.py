@@ -187,6 +187,31 @@ class AlignedEncoderMTEBWrapper:
             modalities=["image", "text"],  # Key: support both modalities
         )
 
+    # Image-only keys tried in priority order (covers I2I retrieval, clustering, linear probe)
+    _IMAGE_KEYS = ("image", "images", "img", "imgs")
+    # Text-only keys (covers T2T retrieval, zero-shot, STS)
+    _TEXT_KEYS  = ("text", "texts", "sentence", "sentences",
+                   "query", "passage", "caption", "captions",
+                   "sentence_1", "sentence_2", "anchor", "positive",
+                   "input", "inputs")
+    # Non-data keys to skip in the fallback scan
+    _SKIP_KEYS  = frozenset({"label", "labels", "cls", "y", "score",
+                              "idx", "index", "id"})
+
+    # Standard ImageNet preprocessing (consistent with training pipeline)
+    _IMG_TRANSFORM = None  # lazy-init to avoid importing T at class definition time
+
+    def _get_transform(self):
+        if AlignedEncoderMTEBWrapper._IMG_TRANSFORM is None:
+            import torchvision.transforms as T
+            AlignedEncoderMTEBWrapper._IMG_TRANSFORM = T.Compose([
+                T.Resize(256),
+                T.CenterCrop(224),
+                T.ToTensor(),
+                T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ])
+        return AlignedEncoderMTEBWrapper._IMG_TRANSFORM
+
     def encode(
         self,
         inputs,  # DataLoader[BatchedInput] in mteb 2.x
@@ -198,91 +223,114 @@ class AlignedEncoderMTEBWrapper:
         **kwargs,
     ) -> np.ndarray:
         """
-        Encode inputs using the new mteb 2.x API.
+        Encode inputs for ANY mteb task type.
 
-        Args:
-            inputs: DataLoader yielding batches of images or texts
-            task_metadata: Task metadata from mteb
-            hf_split: HuggingFace dataset split
-            hf_subset: HuggingFace dataset subset
-            prompt_type: Query or passage (for retrieval tasks)
-            **kwargs: Additional encoding arguments
+        Routing logic
+        -------------
+        mteb passes ``prompt_type="query"`` when encoding retrieval queries
+        and ``prompt_type="passage"`` (or None) when encoding the corpus.
+        We use this signal together with batch key inspection to route each
+        batch to the image or text encoder:
+
+        1. If prompt_type == "query" and batch has only text keys → text encoder.
+        2. If batch has image keys (PIL.Image values) → image encoder.
+        3. If batch has text keys → text encoder.
+        4. Fallback: try every non-skip key, pick image encoder if PIL found.
+
+        ImageTextPairClassification (Compositionality)
+        -----------------------------------------------
+        Tasks like SugarCrepe, EqBen send a batch with BOTH an 'image' and a
+        'caption' / 'text' field.  mteb calls encode() twice: once for images
+        (corpus) and once for texts (captions).  We handle this by checking
+        prompt_type first, then falling through to per-item type detection.
         """
         import torch
-        import torchvision.transforms as T
-        from PIL import Image
+        from PIL import Image as PILImage
 
+        transform = self._get_transform()
         all_embeddings = []
 
-        # inputs is a DataLoader in mteb 2.x - it yields batches
         for batch in inputs:
-            # batch is a dict like {'image': [PIL.Image, ...], 'cls': tensor}
-            # or {'text': [...], ...} depending on the task
+            imgs, txts = self._split_batch(batch, prompt_type, PILImage)
 
-            if isinstance(batch, dict):
-                # Try to extract the data - check for common keys
-                data = None
-                for key in ['image', 'images', 'text', 'texts', 'input', 'inputs', 'sentence']:
-                    if key in batch:
-                        data = batch[key]
-                        break
-
-                if data is None:
-                    # Fallback: use the first non-label value
-                    for k, v in batch.items():
-                        if k not in ['label', 'labels', 'cls', 'y']:
-                            data = v
-                            break
-            elif isinstance(batch, (list, tuple)):
-                data = batch
-            else:
-                data = [batch]
-
-            if data is None or (isinstance(data, (list, tuple)) and len(data) == 0):
-                continue
-
-            # Ensure data is a list
-            if not isinstance(data, (list, tuple)):
-                data = [data]
-
-            # Get first item to determine type
-            first_item = data[0]
-
-            # Detect if image or text
-            is_image = isinstance(first_item, Image.Image)
-
-            if is_image:
-                # Encode image batch.
-                # Use 224×224 + ImageNet normalisation — NOT 32×32 CIFAR stats.
-                # The underlying ResNet-18 was pretrained on ImageNet at this
-                # resolution; using 32×32/CIFAR stats during benchmark evaluation
-                # systematically degrades high-resolution tasks and makes scores
-                # incomparable to published MIEB baselines.
-                transform = T.Compose([
-                    T.Resize(256),
-                    T.CenterCrop(224),
-                    T.ToTensor(),
-                    T.Normalize(
-                        mean=[0.485, 0.456, 0.406],
-                        std=[0.229, 0.224, 0.225],
-                    ),
-                ])
-                tensors = torch.stack([transform(img.convert("RGB")) for img in data])
-                tensors = tensors.to(self.device)
+            if imgs:
+                tensors = torch.stack(
+                    [transform(im.convert("RGB")) for im in imgs]
+                ).to(self.device)
                 with torch.no_grad():
                     emb = self.encoder.encode_image(tensors)
                 all_embeddings.append(emb.cpu().numpy())
-            else:
-                # Encode text batch
-                texts = [str(t) for t in data]
+            elif txts:
                 with torch.no_grad():
-                    emb = self.encoder.encode_text(texts, device=self.device)
+                    emb = self.encoder.encode_text(txts, device=self.device)
                 all_embeddings.append(emb.cpu().numpy())
+            # else: empty batch — skip
 
         if not all_embeddings:
             return np.zeros((0, self.encoder.shared_dim), dtype=np.float32)
 
         return np.concatenate(all_embeddings, axis=0)
+
+    def _split_batch(self, batch, prompt_type, PILImage):
+        """Return (image_list, text_list) for a single batch.
+
+        Exactly one of the two lists will be non-empty (or both empty for
+        an unrecognised batch format).
+        """
+        # ── Normalise batch into a dict ──────────────────────────────────
+        if isinstance(batch, dict):
+            bdict = batch
+        elif isinstance(batch, (list, tuple)) and batch:
+            # Bare list/tuple: determine type from first element
+            first = batch[0]
+            if isinstance(first, PILImage.Image):
+                return list(batch), []
+            return [], [str(x) for x in batch]
+        else:
+            return [], []
+
+        # ── prompt_type-guided routing (Any2AnyRetrieval, cross-modal) ──
+        # "query" usually means text query even in I2T retrieval tasks.
+        if str(prompt_type).lower() == "query":
+            for k in self._TEXT_KEYS:
+                if k in bdict:
+                    items = bdict[k]
+                    if not isinstance(items, (list, tuple)):
+                        items = [items]
+                    if items and not isinstance(items[0], PILImage.Image):
+                        return [], [str(x) for x in items]
+
+        # ── Check explicit image keys first ─────────────────────────────
+        for k in self._IMAGE_KEYS:
+            if k in bdict:
+                items = bdict[k]
+                if not isinstance(items, (list, tuple)):
+                    items = [items]
+                if items and isinstance(items[0], PILImage.Image):
+                    return list(items), []
+
+        # ── Check explicit text keys ─────────────────────────────────────
+        for k in self._TEXT_KEYS:
+            if k in bdict:
+                items = bdict[k]
+                if not isinstance(items, (list, tuple)):
+                    items = [items]
+                if items and not isinstance(items[0], PILImage.Image):
+                    return [], [str(x) for x in items]
+
+        # ── Fallback: scan all non-skip keys ─────────────────────────────
+        for k, v in bdict.items():
+            if k in self._SKIP_KEYS:
+                continue
+            items = v if isinstance(v, (list, tuple)) else [v]
+            if not items:
+                continue
+            if isinstance(items[0], PILImage.Image):
+                return list(items), []
+            if isinstance(items[0], str):
+                return [], [str(x) for x in items]
+
+        return [], []
 
     def similarity(self, embeddings1: np.ndarray, embeddings2: np.ndarray) -> np.ndarray:
         """Compute cosine similarity matrix between two sets of embeddings."""
@@ -446,9 +494,21 @@ def run_evaluation(
                 if cat:
                     category_total[cat] += 1
 
+            # Tasks that are permanently broken upstream (HF dataset removed or
+            # never properly hosted).  Counted as 0.0 in the denominator.
+            # ┌─────────────────────────────────────────┬──────────────────────────────┐
+            # │ Task name                               │ Reason                       │
+            # ├─────────────────────────────────────────┼──────────────────────────────┤
+            # │ Fashion200kI2TRetrieval                 │ HF dataset not publicly avail│
+            # │ NIGHTSI2IRetrieval                      │ HF dataset removed           │
+            # │ VisualSTS17Multilingual                 │ Only multilingual; no eng sub│
+            # │ VisualSTS-b-Multilingual                │ Only multilingual; no eng sub│
+            # └─────────────────────────────────────────┴──────────────────────────────┘
             _known_broken = {
-                "Fashion200kI2TRetrieval", "NIGHTSI2IRetrieval",
-                "VisualSTS17Multilingual", "VisualSTS-b-Multilingual",
+                "Fashion200kI2TRetrieval",   # dataset not publicly hosted
+                "NIGHTSI2IRetrieval",         # dataset removed from HF Hub
+                "VisualSTS17Multilingual",    # no English subset; multilingual only
+                "VisualSTS-b-Multilingual",   # no English subset; multilingual only
             }
 
             for idx, task in enumerate(mteb_tasks, 1):
@@ -490,12 +550,19 @@ def run_evaluation(
                     is_gated = (
                         "gated dataset" in error_msg.lower()
                         or "must be authenticated" in error_msg.lower()
+                        or "access to its metadata" in error_msg.lower()
+                        or "repository" in error_msg.lower() and "private" in error_msg.lower()
                     )
                     if is_gated and skip_gated:
-                        print(f"  ⊗ Gated dataset skipped: {task_name} (counted as 0)")
+                        print(
+                            f"  ⊗ Gated dataset — requires HF token (counted as 0): {task_name}\n"
+                            f"    Fix: huggingface-cli login  (then re-run with --no-skip-gated)"
+                        )
                         skipped_tasks.append(task_name)
                     else:
-                        print(f"  ✗ Error: {error_msg} (counted as 0)")
+                        # Print full error to make it easy to diagnose batch-format issues
+                        print(f"  ✗ Error (counted as 0): {task_name}")
+                        print(f"    {error_msg[:300]}")
                         failed_tasks.append(task_name)
                     # Skipped/failed tasks count as 0 in the denominator
                     if cat:
@@ -563,16 +630,47 @@ def run_evaluation(
 
 
 def _extract_score(result, metric_key: str) -> Optional[float]:
-    """Extract a score from an mteb result object."""
+    """Extract a score from an mteb result object.
+
+    Search order:
+      1. Preferred split ("test", then any other split).
+      2. Within a split: primary metric_key → "main_score" → any numeric value.
+
+    This handles the diversity of mteb result shapes across task types
+    (retrieval ndcg_at_10, clustering v_measure, STS cosine_spearman, etc.).
+    """
     try:
-        if hasattr(result, "scores"):
-            # mteb result format
-            for split_name, split_scores in result.scores.items():
-                for score_dict in split_scores:
-                    if metric_key in score_dict:
-                        return float(score_dict[metric_key])
-                    if "main_score" in score_dict:
-                        return float(score_dict["main_score"])
+        if not hasattr(result, "scores"):
+            return None
+
+        scores_dict = result.scores
+        if not scores_dict:
+            return None
+
+        # Prefer the test split; fall back to the first available split.
+        preferred_splits = ["test"] + [s for s in scores_dict if s != "test"]
+
+        for split_name in preferred_splits:
+            split_scores = scores_dict.get(split_name)
+            if not split_scores:
+                continue
+            for score_dict in split_scores:
+                if not isinstance(score_dict, dict):
+                    continue
+                # 1. Exact metric key
+                if metric_key in score_dict:
+                    v = score_dict[metric_key]
+                    if isinstance(v, (int, float)):
+                        return float(v)
+                # 2. main_score fallback
+                if "main_score" in score_dict:
+                    v = score_dict["main_score"]
+                    if isinstance(v, (int, float)):
+                        return float(v)
+                # 3. Any numeric scalar key (last resort)
+                for k, v in score_dict.items():
+                    if isinstance(v, (int, float)) and k not in ("num_samples",):
+                        return float(v)
         return None
     except Exception:
         return None
