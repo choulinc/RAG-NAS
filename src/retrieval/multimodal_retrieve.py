@@ -168,7 +168,18 @@ class MultiModalRetriever:
         }
 
     def _compute_alpha(self, profile: DatasetProfile, has_image: bool) -> float:
-        """Dynamically adjust α based on dataset characteristics."""
+        """Dynamically adjust α (text weight) based on dataset characteristics.
+
+        .. warning:: **Heuristic α-schedule — requires ablation before publication.**
+
+            The adjustment rules below (+0.1 for README, +0.05 for keywords,
+            -0.2 for image-only) were hand-crafted.  They have NOT been
+            validated on a held-out set of (dataset, best-α) pairs.
+            Reviewers will ask: "How did you choose these deltas? Did you
+            ablate text-only vs image-only vs fused?"  An ablation table
+            covering at least three α values on the NAS retrieval validation
+            set is needed for a credible submission.
+        """
         alpha = self.alpha
 
         # Rich text metadata → boost text weight

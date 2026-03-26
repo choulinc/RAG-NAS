@@ -92,8 +92,12 @@ def _save_images_from_dataset(
                 img_pil = img_pil.convert("RGB")
             img_pil.save(str(save_path))
 
-        key = f"{dataset_label}_{cls_name}"
-        task_to_images.setdefault(key, []).append(str(save_path))
+        # Group images by dataset, not by class.
+        # Positive pairs = same dataset; negative pairs = different dataset.
+        # This trains the encoder to discriminate by domain/dataset rather than
+        # by fine-grained class label, which is the correct inductive bias for
+        # architecture retrieval (we want to find models trained on similar datasets).
+        task_to_images.setdefault(dataset_label, []).append(str(save_path))
 
     return task_to_images
 
@@ -154,8 +158,7 @@ def download_dataset(
                     img_pil = img_pil.convert("RGB")
                 img_pil.save(str(save_path))
 
-            key = f"svhn_{cls_name}"
-            task_to_images.setdefault(key, []).append(str(save_path))
+            task_to_images.setdefault("svhn", []).append(str(save_path))
         return task_to_images
 
     if dataset_name == "fashionmnist":
@@ -183,8 +186,7 @@ def download_dataset(
                     img_pil = img_pil.convert("RGB")
                 img_pil.save(str(save_path))
 
-            key = f"fl102_{cls_name}"
-            task_to_images.setdefault(key, []).append(str(save_path))
+            task_to_images.setdefault("flowers102", []).append(str(save_path))
         return task_to_images
 
     if dataset_name == "food101":
@@ -208,8 +210,7 @@ def download_dataset(
                     img_pil = img_pil.convert("RGB")
                 img_pil.save(str(save_path))
 
-            key = f"food_{cls_name}"
-            task_to_images.setdefault(key, []).append(str(save_path))
+            task_to_images.setdefault("food101", []).append(str(save_path))
         return task_to_images
 
     raise ValueError(f"Unsupported dataset: {dataset_name}")
@@ -219,22 +220,26 @@ def load_imagefolder(
     folder: str,
     prefix: str | None = None,
 ) -> dict[str, list[str]]:
-    """Load an ImageFolder-style directory (class_name/images...)."""
+    """Load an ImageFolder-style directory (class_name/images...).
+
+    All images from the folder are grouped under a single dataset key
+    (the prefix / folder name) so that contrastive training learns
+    dataset-level rather than class-level discrimination.
+    """
     folder = Path(folder)
     if prefix is None:
         prefix = folder.name
-    task_to_images: dict[str, list[str]] = {}
+    all_imgs: list[str] = []
     for cls_dir in sorted(folder.iterdir()):
         if not cls_dir.is_dir():
             continue
-        key = f"{prefix}_{cls_dir.name}"
-        imgs = sorted(
+        all_imgs.extend(
             str(p) for p in cls_dir.iterdir()
             if p.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
         )
-        if imgs:
-            task_to_images[key] = imgs
-    return task_to_images
+    if all_imgs:
+        return {prefix: sorted(all_imgs)}
+    return {}
 
 
 def convert_csv_label_to_imagefolder(

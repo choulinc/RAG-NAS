@@ -132,11 +132,15 @@ class LocalTemplateGenerator:
         try:
             data = json.loads(text_to_parse)
             if isinstance(data, dict) and "templates" in data:
-                return data["templates"]
-            if isinstance(data, list):
-                return data
-            return [data]  # single template object
+                raw = data["templates"]
+            elif isinstance(data, list):
+                raw = data
+            else:
+                raw = [data]
         except json.JSONDecodeError:
             print("Failed to decode JSON from local LLM response.")
             print(content[:2000])
             return []
+
+        from src.retrieval.llm_template_generator import _validate_template
+        return [_validate_template(t) for t in raw if isinstance(t, dict)]

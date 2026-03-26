@@ -2,10 +2,19 @@
 Contrastive Learning Encoder for RAG-NAS image pathway.
 
 Provides:
-  - ContrastiveLoss: conditional loss switching between same/different task types
+  - ContrastiveLoss: margin-based loss between same-class / different-class pairs
   - SiameseEncoder: ResNet-18 backbone → 128-d embedding (backbone swappable)
   - ContrastiveTrainer: pair-based training on NAS-Bench-201 datasets
   - ImageRetriever: cosine similarity search against a FeatureStore
+
+What is learnt:
+    The encoder is trained with dataset-level positive/negative pairs.
+    Positive pair  = two images from the *same dataset* (e.g. both from CIFAR-10).
+    Negative pair  = two images from *different datasets* (e.g. CIFAR-10 vs STL-10).
+    This produces embeddings that cluster by dataset/domain, which is what is
+    needed for the image-pathway retrieval step in RAG-NAS (retrieving models
+    trained on similar datasets).  It is NOT a general task-type discriminator;
+    claims in the paper should be scoped accordingly.
 """
 from __future__ import annotations
 
@@ -42,15 +51,15 @@ except ImportError:
 
 class ContrastiveLoss(nn.Module):
     """
-    Contrastive loss with conditional switching.
+    Margin-based contrastive loss.
 
     L(V1, V2, y) = y · β₁ · ‖V1 - V2‖²
                  + (1-y) · β₂ · max(0, margin - ‖V1 - V2‖)²
 
     Args:
-        margin: minimum desired distance between different-class pairs.
-        beta_pos: weight coefficient for same-class (positive) pairs.
-        beta_neg: weight coefficient for different-class (negative) pairs.
+        margin: minimum desired distance between different-dataset pairs.
+        beta_pos: weight for same-dataset (positive) pairs.
+        beta_neg: weight for different-dataset (negative) pairs.
     """
 
     def __init__(self, margin: float = 1.0, beta_pos: float = 1.0, beta_neg: float = 1.0):
@@ -66,7 +75,7 @@ class ContrastiveLoss(nn.Module):
         Args:
             v1: (B, D) embedding batch from encoder arm 1
             v2: (B, D) embedding batch from encoder arm 2
-            y:  (B,) labels — 1.0 if same task type, 0.0 if different
+            y:  (B,) labels — 1.0 if same dataset, 0.0 if different dataset
 
         Returns:
             Scalar loss averaged over the batch.
@@ -276,15 +285,20 @@ class ContrastivePairDataset(Dataset):
     """
     Dataset yielding (img1, img2, label) pairs for contrastive training.
 
-    Expects a dict mapping task_type → list of image paths.
-    Generates balanced positive/negative pairs each epoch.
+    Expects a dict mapping dataset_name → list of image paths.
+    Each key represents one dataset/domain (e.g. "cifar10", "stl10").
+    Positive pair  = two images from the same dataset key.
+    Negative pair  = two images from different dataset keys.
+
+    This trains the encoder to cluster images by dataset/domain, which
+    is the correct inductive bias for the RAG-NAS retrieval step.
     """
 
     def __init__(
         self,
         task_to_images: Dict[str, List[str]],
         pairs_per_epoch: int = 2000,
-        image_size: int = 32,
+        image_size: int = 224,
         augment: bool = True,
     ):
         self.task_to_images = task_to_images
@@ -296,19 +310,24 @@ class ContrastivePairDataset(Dataset):
         self.pairs: List[PairSample] = []
         self._build_pairs()
 
-        # Transforms
+        # Transforms — use ImageNet statistics throughout (ResNet-18 pretrained at
+        # 224×224 with these stats; consistent with MIEB evaluation pipeline).
+        _imagenet_norm = T.Normalize(
+            mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+        )
         base_transforms = [
-            T.Resize((image_size, image_size)),
+            T.Resize(256),
+            T.CenterCrop(image_size),
             T.ToTensor(),
-            T.Normalize(mean=[0.4914, 0.4822, 0.4465], std=[0.2023, 0.1994, 0.2010]),
+            _imagenet_norm,
         ]
         if augment:
             self.transform = T.Compose([
-                T.Resize((image_size, image_size)),
+                T.RandomResizedCrop(image_size, scale=(0.6, 1.0)),
                 T.RandomHorizontalFlip(),
-                T.RandomCrop(image_size, padding=4),
+                T.ColorJitter(0.2, 0.2, 0.2, 0.05),
                 T.ToTensor(),
-                T.Normalize(mean=[0.4914, 0.4822, 0.4465], std=[0.2023, 0.1994, 0.2010]),
+                _imagenet_norm,
             ])
         else:
             self.transform = T.Compose(base_transforms)
@@ -514,9 +533,10 @@ class ImageRetriever:
         self.encoder.eval()
 
         self.transform = T.Compose([
-            T.Resize((32, 32)),
+            T.Resize(256),
+            T.CenterCrop(224),
             T.ToTensor(),
-            T.Normalize(mean=[0.4914, 0.4822, 0.4465], std=[0.2023, 0.1994, 0.2010]),
+            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ])
 
     @torch.no_grad()

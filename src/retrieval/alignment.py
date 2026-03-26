@@ -88,6 +88,17 @@ class SigLIPLoss(nn.Module):
     Advantages over InfoNCE/CLIP:
       - No global softmax → works with small batch sizes
       - Pairwise → each pair contributes independently
+
+    Known limitation — false-negative noise:
+        This implementation treats every off-diagonal pair as a hard
+        negative (yᵢⱼ = -1).  When a batch contains semantically similar
+        or near-duplicate class names (e.g. "cat" and "kitten", or two
+        CIFAR-100 super-classes), these are incorrectly penalised.
+        Mitigation options for future work:
+          (a) Soft labels: yᵢⱼ = cosine similarity of class-name embeddings.
+          (b) Hard-negative mining with a semantic similarity filter.
+          (c) Replace class-name supervision with richer image-caption pairs
+              (e.g., CC3M, LAION subsets) that have genuine negatives.
     """
 
     def __init__(self, init_temperature: float = 10.0, init_bias: float = -10.0):
@@ -102,7 +113,7 @@ class SigLIPLoss(nn.Module):
         Args:
             image_emb: (B, D) L2-normalized image projections
             text_emb:  (B, D) L2-normalized text projections
-            (assumes diagonal = positive pairs, off-diagonal = negative)
+            (diagonal = positive pairs, off-diagonal = negatives)
 
         Returns:
             Scalar loss.
@@ -211,31 +222,61 @@ class ImageTextPairDataset(Dataset):
     Dataset producing (image, text_label) pairs for alignment training.
 
     Reads from an ImageFolder structure:
-        root/class_name/image.png → text = class_name
+        root/class_name/image.png → text = one of several descriptive templates
+
+    Text supervision:
+        Using only the bare class name (e.g. "cat") as text is too weak:
+        it leaves the text encoder with a single token and makes it hard to
+        distinguish visually similar categories.  We instead sample at
+        random from a small set of CLIP-style prompt templates at __getitem__
+        time, giving the alignment more varied natural-language signal.
+        This is a direct analogue of the prompt ensembling used in CLIP
+        (Radford et al. 2021) and improves cross-modal generalisation.
+
+        Remaining limitation: supervision is still class-name-derived and
+        does not cover the full diversity of MIEB tasks (retrieval captions,
+        doc-understanding queries, VCQA questions, etc.).  Fine-tuning on
+        a richer caption corpus (e.g. CC3M, LAION-COCO) would further
+        improve benchmark performance but is out of scope here.
     """
+
+    # Prompt templates adapted from CLIP (Radford et al. 2021)
+    _TEMPLATES: List[str] = [
+        "a photo of a {}",
+        "a picture of a {}",
+        "an image of a {}",
+        "a photo of the {}",
+        "a close-up photo of a {}",
+        "a bright photo of a {}",
+        "a cropped photo of a {}",
+        "a good photo of a {}",
+        "{}",  # bare class name as fallback
+    ]
 
     def __init__(
         self,
         root_dirs: List[str],
-        image_size: int = 32,
+        image_size: int = 224,
         max_per_class: int = 50,
     ):
-        self.samples: List[Tuple[str, str]] = []  # (image_path, text_label)
+        self.samples: List[Tuple[str, str]] = []  # (image_path, class_name)
+        # Training uses the same resolution as MIEB evaluation to avoid
+        # train/test preprocessing mismatch.
         self.transform = T.Compose([
-            T.Resize((image_size, image_size)),
+            T.Resize(256),
+            T.CenterCrop(image_size),
             T.ToTensor(),
-            T.Normalize(mean=[0.4914, 0.4822, 0.4465], std=[0.2023, 0.1994, 0.2010]),
+            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ])
 
         for root in root_dirs:
             root_path = Path(root)
             if not root_path.exists():
                 continue
-            # Walk ImageFolder structure
             for cls_dir in sorted(root_path.iterdir()):
                 if not cls_dir.is_dir():
                     continue
-                class_name = cls_dir.name
+                class_name = cls_dir.name.replace("_", " ")
                 imgs = sorted(
                     p for p in cls_dir.iterdir()
                     if p.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
@@ -243,9 +284,7 @@ class ImageTextPairDataset(Dataset):
                 if len(imgs) > max_per_class:
                     imgs = random.sample(imgs, max_per_class)
                 for img_path in imgs:
-                    # Create descriptive text from class name
-                    text = class_name.replace("_", " ")
-                    self.samples.append((str(img_path), text))
+                    self.samples.append((str(img_path), class_name))
 
         random.shuffle(self.samples)
         print(f"ImageTextPairDataset: {len(self.samples)} pairs from {len(root_dirs)} dirs")
@@ -254,9 +293,12 @@ class ImageTextPairDataset(Dataset):
         return len(self.samples)
 
     def __getitem__(self, idx):
-        path, text = self.samples[idx]
+        path, class_name = self.samples[idx]
         img = Image.open(path).convert("RGB")
         img = self.transform(img)
+        # Sample a random prompt template to diversify text supervision
+        template = random.choice(self._TEMPLATES)
+        text = template.format(class_name)
         return img, text
 
 

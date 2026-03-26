@@ -1,3 +1,4 @@
+import argparse
 import os
 import sys
 import json
@@ -59,12 +60,26 @@ def create_mock_uir(uir_path: str) -> str:
     return uir_path
 
 
-def run_nasbench201_evaluation():
+def seed_everything(seed: int) -> None:
+    """Seed Python, NumPy, and PyTorch for reproducibility."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    # Deterministic cuDNN (may slow training; acceptable for NAS search)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
+def run_nasbench201_evaluation(seed: int = 42) -> dict:
+    """Run one complete RAG-NAS trial and return the result metrics dict."""
+    seed_everything(seed)
     tmpdir = tempfile.mkdtemp(prefix="ragnas_nb201_")
 
     try:
         print("========================================================================")
-        print("  RAG-NAS: NAS-Bench-201 Evaluation (Full Pipeline with Local Qwen)")
+        print(f"  RAG-NAS: NAS-Bench-201 Evaluation  (seed={seed})")
         print("========================================================================")
 
         # 1. Dataset Analysis
@@ -124,15 +139,24 @@ def run_nasbench201_evaluation():
 
         print("      Loading NAS-Bench-201 API...")
         evaluator = NASBench201Evaluator(nb201_api_path)
-        
-        # EA runs on CIFAR-100 surrogate by default in evaluate_gene
-        ea = REA(templates, evaluator, ea_config=ea_config)
+
+        # Search uses CIFAR-100 *validation* accuracy as fitness.
+        # The test set is never queried during search; it is held out for
+        # final reporting in step 5 below.
+        ea = REA(
+            templates,
+            evaluator,
+            ea_config=ea_config,
+            search_dataset="cifar100",
+            search_metric="x-valid",   # validation metric — NOT test set
+            seed=seed,
+        )
         ea.initialize_population()
         best_gene, best_fit = ea.run()
         best_arch_str = gene_to_string(best_gene)
-        
-        print(f"\n      Found Best Architecture (CIFAR-100 proxy): {best_arch_str}")
-        print(f"      Proxy Accuracy: {best_fit:.2f}%")
+
+        print(f"\n      Found Best Architecture (CIFAR-100 valid proxy): {best_arch_str}")
+        print(f"      Proxy Validation Accuracy: {best_fit:.2f}%")
 
         # 5. Full NAS-Bench-201 Evaluation for target datasets
         print("\n\n[5/5] Extracting true NAS-Bench-201 Test/Valid Metrics...")
@@ -162,28 +186,124 @@ def run_nasbench201_evaluation():
         output_csv = os.path.join(PROJECT_ROOT, "experiments", "results_nasbench201.csv")
         os.makedirs(os.path.dirname(output_csv), exist_ok=True)
         
-        new_row = {
-            "Methods": "RAG-NAS (Qwen)",
-            "CIFAR-10 valid": f"{cifar10_valid:.2f}",
-            "CIFAR-10 test": f"{cifar10_test:.2f}",
-            "CIFAR-100 valid": f"{cifar100_valid:.2f}",
-            "CIFAR-100 test": f"{cifar100_test:.2f}",
-            "ImageNet-16-120 valid": f"{in16_valid:.2f}",
-            "ImageNet-16-120 test": f"{in16_test:.2f}"
+        trial_metrics = {
+            "seed": seed,
+            "best_arch": best_arch_str,
+            "cifar10_valid": cifar10_valid,
+            "cifar10_test": cifar10_test,
+            "cifar100_valid": cifar100_valid,
+            "cifar100_test": cifar100_test,
+            "in16_valid": in16_valid,
+            "in16_test": in16_test,
         }
-
-        # Write to csv
-        file_exists = os.path.exists(output_csv)
-        with open(output_csv, "w", newline="") as f:
-            fieldnames = ["Methods", "CIFAR-10 valid", "CIFAR-10 test", "CIFAR-100 valid", "CIFAR-100 test", "ImageNet-16-120 valid", "ImageNet-16-120 test"]
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerow(new_row)
-
-        print(f"\n[Success] Results saved to {output_csv}")
+        return trial_metrics
 
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
+
+def _aggregate_trials(all_metrics: list) -> dict:
+    """Compute mean ± std across trials for each numeric metric."""
+    keys = ["cifar10_valid", "cifar10_test", "cifar100_valid",
+            "cifar100_test", "in16_valid", "in16_test"]
+    agg = {}
+    for k in keys:
+        vals = [m[k] for m in all_metrics]
+        agg[k] = {"mean": float(np.mean(vals)), "std": float(np.std(vals))}
+    return agg
+
+
 if __name__ == "__main__":
-    run_nasbench201_evaluation()
+    ap = argparse.ArgumentParser(
+        description="RAG-NAS end-to-end evaluation on NAS-Bench-201"
+    )
+    ap.add_argument("--seed", type=int, default=42,
+                    help="Base random seed (default: 42).")
+    ap.add_argument("--trials", type=int, default=1,
+                    help="Number of independent trials to run. Each trial uses "
+                         "seed + trial_index so results are reproducible. "
+                         "Use ≥3 to report mean ± std (required for top venues).")
+    args = ap.parse_args()
+
+    all_metrics = []
+    for trial_idx in range(args.trials):
+        trial_seed = args.seed + trial_idx
+        print(f"\n{'='*72}")
+        print(f"  Trial {trial_idx + 1}/{args.trials}  (seed={trial_seed})")
+        print(f"{'='*72}")
+        metrics = run_nasbench201_evaluation(seed=trial_seed)
+        all_metrics.append(metrics)
+
+    # ── Single-trial output ──────────────────────────────────────────────────
+    if args.trials == 1:
+        m = all_metrics[0]
+        output_csv = os.path.join(PROJECT_ROOT, "experiments", "results_nasbench201.csv")
+        os.makedirs(os.path.dirname(output_csv), exist_ok=True)
+        row = {
+            "Methods": f"RAG-NAS (seed={m['seed']})",
+            "CIFAR-10 valid":         f"{m['cifar10_valid']:.2f}",
+            "CIFAR-10 test":          f"{m['cifar10_test']:.2f}",
+            "CIFAR-100 valid":        f"{m['cifar100_valid']:.2f}",
+            "CIFAR-100 test":         f"{m['cifar100_test']:.2f}",
+            "ImageNet-16-120 valid":  f"{m['in16_valid']:.2f}",
+            "ImageNet-16-120 test":   f"{m['in16_test']:.2f}",
+        }
+        fieldnames = list(row.keys())
+        with open(output_csv, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerow(row)
+        print(f"\n[Success] Results saved to {output_csv}")
+
+    # ── Multi-trial output (mean ± std) ─────────────────────────────────────
+    else:
+        agg = _aggregate_trials(all_metrics)
+        output_csv = os.path.join(
+            PROJECT_ROOT, "experiments",
+            f"results_nasbench201_{args.trials}trials_seed{args.seed}.csv"
+        )
+        os.makedirs(os.path.dirname(output_csv), exist_ok=True)
+
+        # Write one row per trial + a summary row
+        fieldnames = [
+            "Methods",
+            "CIFAR-10 valid", "CIFAR-10 test",
+            "CIFAR-100 valid", "CIFAR-100 test",
+            "ImageNet-16-120 valid", "ImageNet-16-120 test",
+        ]
+        with open(output_csv, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            for m in all_metrics:
+                writer.writerow({
+                    "Methods":               f"RAG-NAS (seed={m['seed']})",
+                    "CIFAR-10 valid":        f"{m['cifar10_valid']:.2f}",
+                    "CIFAR-10 test":         f"{m['cifar10_test']:.2f}",
+                    "CIFAR-100 valid":       f"{m['cifar100_valid']:.2f}",
+                    "CIFAR-100 test":        f"{m['cifar100_test']:.2f}",
+                    "ImageNet-16-120 valid": f"{m['in16_valid']:.2f}",
+                    "ImageNet-16-120 test":  f"{m['in16_test']:.2f}",
+                })
+            # Summary row
+            writer.writerow({
+                "Methods": f"RAG-NAS mean±std ({args.trials} trials)",
+                "CIFAR-10 valid":
+                    f"{agg['cifar10_valid']['mean']:.2f}±{agg['cifar10_valid']['std']:.2f}",
+                "CIFAR-10 test":
+                    f"{agg['cifar10_test']['mean']:.2f}±{agg['cifar10_test']['std']:.2f}",
+                "CIFAR-100 valid":
+                    f"{agg['cifar100_valid']['mean']:.2f}±{agg['cifar100_valid']['std']:.2f}",
+                "CIFAR-100 test":
+                    f"{agg['cifar100_test']['mean']:.2f}±{agg['cifar100_test']['std']:.2f}",
+                "ImageNet-16-120 valid":
+                    f"{agg['in16_valid']['mean']:.2f}±{agg['in16_valid']['std']:.2f}",
+                "ImageNet-16-120 test":
+                    f"{agg['in16_test']['mean']:.2f}±{agg['in16_test']['std']:.2f}",
+            })
+
+        print("\n" + "=" * 72)
+        print(f"  Multi-Trial Summary ({args.trials} trials, base seed={args.seed})")
+        print("=" * 72)
+        for k, v in agg.items():
+            print(f"  {k:<24}  {v['mean']:.2f} ± {v['std']:.2f}")
+        print(f"\n[Success] Results saved to {output_csv}")

@@ -2,6 +2,21 @@ import argparse
 from src.retrieval.retrieve import retrieve
 
 def parse_query_to_filters(q: str):
+    """Extract hard pre-filters from a free-text query via keyword matching.
+
+    .. warning:: **Hand-crafted keyword rules — validate on a labelled set.**
+
+        The keyword → filter mapping below was written by inspecting a small
+        sample of UIR entries. It has NOT been validated against a held-out
+        query set and will silently produce wrong filters for queries that
+        use synonyms, abbreviations, or non-English phrasing.
+
+        For a rigorous system the query parser should be:
+          (a) tested on ≥50 labelled (query, expected_filter) pairs, OR
+          (b) replaced with a small zero-shot classifier (e.g. prompted LLM).
+        As written it is fine for a prototype but should not be presented as
+        a robust query-understanding component without such evidence.
+    """
     ql = q.lower()
     filters = {}
 
@@ -20,7 +35,6 @@ def parse_query_to_filters(q: str):
     # collections (optional quick rules)
     for col in ["beit", "beitv2", "barlowtwins", "arcface"]:
         if col in ql:
-            # your UIR uses "BEiT", "BEiTv2", ...
             mapping = {"beit": "BEiT", "beitv2": "BEiTv2", "barlowtwins": "BarlowTwins", "arcface": "ArcFace"}
             filters["collection"] = mapping[col]
             break

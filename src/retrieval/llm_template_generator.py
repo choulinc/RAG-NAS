@@ -71,6 +71,78 @@ Ensure constraints prevent invalid empty graphs (too many 'none's).
 Be sure to generate at least 2 radically different templates ensuring great exploration diversity!
 """
 
+def _normalize_prior(prior: Dict[str, float]) -> Dict[str, float]:
+    """Normalize a probability dict to sum to 1.0, discarding non-positive entries."""
+    filtered = {k: v for k, v in prior.items() if isinstance(v, (int, float)) and v > 0}
+    total = sum(filtered.values())
+    if total <= 0:
+        # Uniform fallback
+        return {k: 1.0 / len(NB201_OPS) for k in NB201_OPS}
+    return {k: v / total for k, v in filtered.items()}
+
+
+NB201_OPS = ["nor_conv_3x3", "nor_conv_1x1", "skip_connect", "avg_pool_3x3", "none"]
+
+
+def _validate_template(template: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate and normalise an LLM-generated template.
+
+    Checks performed:
+      - Required top-level keys present (paradigm, micro).
+      - op_prior keys are valid NB201 ops; distribution renormalized to 1.0.
+      - edge_prior entries renormalized individually.
+      - Warns about unrecognised ops (common LLM hallucination).
+      - Warns about macro forbidden_pair constraints not yet enforced by the EA
+        (so authors are aware of the gap rather than silently ignoring them).
+
+    Returns the cleaned template dict (mutates in-place for convenience).
+    """
+    if "paradigm" not in template:
+        template.setdefault("paradigm", "unknown")
+
+    micro_nb201 = template.get("micro", {}).get("nb201", {})
+
+    # --- op_prior ---
+    op_prior = micro_nb201.get("op_prior", {})
+    if op_prior:
+        unknown_ops = [k for k in op_prior if k not in NB201_OPS]
+        if unknown_ops:
+            print(f"[Template Warning] Unknown ops in op_prior (will be dropped): {unknown_ops}")
+        op_prior = {k: v for k, v in op_prior.items() if k in NB201_OPS}
+        if not op_prior:
+            print("[Template Warning] op_prior empty after filtering; using uniform prior.")
+        micro_nb201["op_prior"] = _normalize_prior(op_prior) if op_prior else {op: 1.0 / len(NB201_OPS) for op in NB201_OPS}
+
+    # --- edge_prior ---
+    edge_prior = micro_nb201.get("edge_prior", {})
+    for edge, prior in edge_prior.items():
+        if isinstance(prior, dict):
+            cleaned = {k: v for k, v in prior.items() if k in NB201_OPS}
+            if not cleaned:
+                del edge_prior[edge]
+                continue
+            edge_prior[edge] = _normalize_prior(cleaned)
+    if edge_prior:
+        micro_nb201["edge_prior"] = edge_prior
+
+    # --- macro forbidden_pair constraints ---
+    macro_constraints = template.get("macro", {}).get("constraints", [])
+    forbidden = [c for c in macro_constraints if c.get("type") == "forbidden_pair"]
+    if forbidden:
+        print(
+            f"[Template Warning] {len(forbidden)} macro forbidden_pair constraint(s) found "
+            f"in template '{template.get('paradigm')}'. "
+            f"These are NOT currently enforced by the EA mutation step. "
+            f"Either remove them from the template claim or implement enforcement in REA."
+        )
+
+    # Ensure nested path exists after potential mutation
+    if template.get("micro") and template["micro"].get("nb201") is not None:
+        template["micro"]["nb201"] = micro_nb201
+
+    return template
+
+
 def build_context_text(hits: List[Dict[str, Any]]) -> str:
     lines = []
     lines.append("--- RETRIEVED CONTEXT FROM OPENMMLAB UIR ---")
@@ -142,13 +214,16 @@ class TemplateGenerator:
         content = response.choices[0].message.content
         try:
             data = json.loads(content)
-            if "templates" in data:
-                return data["templates"]
-            return [data] # fallback
+            raw_templates = data["templates"] if "templates" in data else [data]
         except json.JSONDecodeError:
             print("Failed to decode JSON from LLM response.")
             print(content)
             return []
+
+        validated = [_validate_template(t) for t in raw_templates if isinstance(t, dict)]
+        if len(validated) < len(raw_templates):
+            print(f"[Template Warning] {len(raw_templates) - len(validated)} template(s) dropped (non-dict).")
+        return validated
 
 
 def get_template_generator(

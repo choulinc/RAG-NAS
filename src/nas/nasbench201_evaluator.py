@@ -36,15 +36,25 @@ class NASBench201Evaluator:
         self.api = API(api_path, verbose=False)
         print("Loaded NAS-Bench-201 successfully.")
 
-    def evaluate(self, arch_str: str, dataset: str = "cifar100", metric: str = "ori-test") -> float:
+    def evaluate(self, arch_str: str, dataset: str = "cifar100", metric: str = "x-valid") -> float:
         """
         Evaluate a cell structure string on NAS-Bench-201.
+
         Args:
-            arch_str: The architecture string (e.g., "|nor_conv_3x3~0|+|nor_conv_3x3~0|avg_pool_3x3~1|+|...|")
+            arch_str: The architecture string (e.g., "|nor_conv_3x3~0|+|...|")
             dataset: Target dataset ("cifar10-valid", "cifar100", "ImageNet16-120").
-            metric: Target metric ("ori-test", "x-valid", "x-test"). "ori-test" refers to the accuracy on the test set.
+            metric: Target metric.
+                - "x-valid"  → validation accuracy (USE THIS for architecture search /
+                               fitness evaluation to avoid test-set leakage).
+                - "x-test"   → test accuracy (reserved for final held-out reporting).
+                - "ori-test" → alternative test split for cifar10-valid.
         Returns:
-            The accuracy (float 0-100). If invalid or not found, returns 0.0.
+            The accuracy (float 0–100). Returns 0.0 if arch is invalid or not found.
+
+        Protocol note:
+            Architecture selection (EA fitness) MUST use "x-valid".
+            "x-test" / "ori-test" should only be queried AFTER the best architecture
+            has been committed, to report the final held-out performance.
         """
         try:
             index = self.api.query_index_by_arch(arch_str)

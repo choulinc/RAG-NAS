@@ -4,7 +4,7 @@ import argparse
 import sys
 import os
 from collections import Counter
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 
 # relative import from src
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
@@ -69,13 +69,22 @@ def gene_to_string(gene: List[str]) -> str:
 
 class REA:
     """
-    Regularized Evolution Algorithm.
+    Regularized Evolution Algorithm for NAS-Bench-201.
+
+    Search protocol:
+        - Fitness during evolution uses ``search_dataset`` / ``search_metric``
+          (defaults: cifar100 / x-valid) so the test set is never seen during search.
+        - Final held-out test metrics must be queried separately by the caller
+          AFTER committing to the best architecture.
     """
     def __init__(
-        self, 
-        templates: List[Dict[str, Any]], 
-        evaluator: NASBench201Evaluator, 
-        ea_config: Dict[str, Any]
+        self,
+        templates: List[Dict[str, Any]],
+        evaluator: NASBench201Evaluator,
+        ea_config: Dict[str, Any],
+        search_dataset: str = "cifar100",
+        search_metric: str = "x-valid",
+        seed: Optional[int] = None,
     ):
         self.templates = templates
         self.evaluator = evaluator
@@ -84,12 +93,20 @@ class REA:
         self.cycles = ea_config.get("cycles", 100)
         self.max_mutation_retries = ea_config.get("max_mutation_retries", 50)
         self.max_sampling_retries = ea_config.get("max_sampling_retries", 100)
-        self.population: List[Tuple[List[str], Dict[str, Any], float]] = [] # [(gene, template, fitness)]
+        # Search uses validation set only — test set is held out for final reporting.
+        self.search_dataset = search_dataset
+        self.search_metric = search_metric
+        self.population: List[Tuple[List[str], Dict[str, Any], float]] = []  # [(gene, template, fitness)]
         self.history = []
+        if seed is not None:
+            random.seed(seed)
 
     def evaluate_gene(self, gene: List[str]) -> float:
+        """Evaluate fitness on the held-in validation set (never the test set)."""
         arch_str = gene_to_string(gene)
-        return self.evaluator.evaluate(arch_str)
+        return self.evaluator.evaluate(
+            arch_str, dataset=self.search_dataset, metric=self.search_metric
+        )
 
     def initialize_population(self):
         print("Initializing population...")
@@ -108,20 +125,23 @@ class REA:
             best_parent = max(tournament, key=lambda x: x[2])
             parent_gene, parent_tmpl, _ = best_parent
             
-            # Mutate: pick one edge and change it based on the parent's template prior
+            # Mutate: pick one edge and resample it using the template's per-edge prior
+            # (falls back to op_prior if no edge-specific entry exists).
             child_gene = list(parent_gene)
             mut_idx = random.randint(0, 5)
-            
-            # We just resample the whole gene from template and replace the single edge to guarantee valid priors.
-            # But we must also check constraints!
+
             micro = parent_tmpl.get("micro", {}).get("nb201", {})
             constraints = micro.get("constraints", [])
-            
+            op_prior = micro.get("op_prior", {op: 1.0 / len(NB201_OPS) for op in NB201_OPS})
+            edge_prior = micro.get("edge_prior", {})
+            edge_name = ["0->1", "0->2", "1->2", "0->3", "1->3", "2->3"][mut_idx]
+            # Use edge-specific prior when available; otherwise fall back to global op_prior.
+            mutation_prior = edge_prior.get(edge_name, op_prior)
+
             valid = False
             for _ in range(self.max_mutation_retries):
                 new_gene = list(child_gene)
-                new_op = sample_op(micro.get("op_prior", {op: 1.0 for op in NB201_OPS}))
-                new_gene[mut_idx] = new_op
+                new_gene[mut_idx] = sample_op(mutation_prior)
                 if is_valid_cell(new_gene, constraints):
                     child_gene = new_gene
                     valid = True

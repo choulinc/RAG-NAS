@@ -6,20 +6,48 @@ and outputs results in Paper Table 2 format.
 
 Paper: "MIEB: Massive Image Embedding Benchmark" (arXiv:2504.10471)
 Columns: Model | Retrieval | Clustering | ZeroShot Cls | Linear Probe |
-         Visual STS | Doc Und. | Compositionality | VCQA | MIEB | MIEB-lite
+         Visual STS | Doc Und. | Compositionality | VCQA | MIEB-lite
+
+Evaluation protocol notes
+--------------------------
+* Image preprocessing: 224×224 centre-crop + ImageNet normalisation
+  (mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225]).
+  Using 32×32 CIFAR preprocessing during benchmark evaluation would
+  systematically degrade high-resolution tasks (doc understanding,
+  compositionality, visual STS) and make the results incomparable to
+  published MIEB numbers.
+
+* Denominator: category averages are computed over the *full* set of
+  expected tasks for the selected benchmark variant (MIEB-lite or MIEB).
+  Skipped/failed tasks contribute a score of 0.0 and are flagged in the
+  output so reviewers can distinguish "not evaluated" from "poor score".
+  This mirrors the denominator convention used in the MIEB paper.
+
+* Benchmark variant: pass ``--benchmark MIEB-lite`` (default) or
+  ``--benchmark MIEB``.  The overall column is labelled accordingly;
+  outputting a single "MIEB" and a separate "MIEB-lite" column with
+  the same value (as prior code did) is misleading and is now removed.
 
 Usage:
-    # Full MIEB evaluation
-    python experiments/mieb_eval.py \
-        --alignment_checkpoint checkpoints/aligned_encoder.pt \
-        --encoder_checkpoint checkpoints/contrastive_encoder_best.pt \
-        --output experiments/results.csv
+    # MIEB-lite evaluation (recommended for development)
+    python experiments/mieb_eval.py \\
+        --alignment_checkpoint checkpoints/aligned_encoder.pt \\
+        --encoder_checkpoint checkpoints/contrastive_encoder_best.pt \\
+        --benchmark MIEB-lite \\
+        --output experiments/results_mieb_lite.csv
 
-    # Quick test with subset
-    python experiments/mieb_eval.py \
-        --alignment_checkpoint checkpoints/aligned_encoder.pt \
-        --encoder_checkpoint checkpoints/contrastive_encoder_best.pt \
-        --tasks quick \
+    # Full MIEB evaluation
+    python experiments/mieb_eval.py \\
+        --alignment_checkpoint checkpoints/aligned_encoder.pt \\
+        --encoder_checkpoint checkpoints/contrastive_encoder_best.pt \\
+        --benchmark MIEB \\
+        --output experiments/results_mieb.csv
+
+    # Quick sanity-check with one task per category
+    python experiments/mieb_eval.py \\
+        --alignment_checkpoint checkpoints/aligned_encoder.pt \\
+        --encoder_checkpoint checkpoints/contrastive_encoder_best.pt \\
+        --tasks quick \\
         --output experiments/results_quick.csv
 """
 from __future__ import annotations
@@ -224,13 +252,19 @@ class AlignedEncoderMTEBWrapper:
             is_image = isinstance(first_item, Image.Image)
 
             if is_image:
-                # Encode image batch
+                # Encode image batch.
+                # Use 224×224 + ImageNet normalisation — NOT 32×32 CIFAR stats.
+                # The underlying ResNet-18 was pretrained on ImageNet at this
+                # resolution; using 32×32/CIFAR stats during benchmark evaluation
+                # systematically degrades high-resolution tasks and makes scores
+                # incomparable to published MIEB baselines.
                 transform = T.Compose([
-                    T.Resize((32, 32)),
+                    T.Resize(256),
+                    T.CenterCrop(224),
                     T.ToTensor(),
                     T.Normalize(
-                        mean=[0.4914, 0.4822, 0.4465],
-                        std=[0.2023, 0.1994, 0.2010],
+                        mean=[0.485, 0.456, 0.406],
+                        std=[0.229, 0.224, 0.225],
                     ),
                 ])
                 tensors = torch.stack([transform(img.convert("RGB")) for img in data])
@@ -271,39 +305,51 @@ class AlignedEncoderMTEBWrapper:
 # Evaluation Runner
 # ---------------------------------------------------------------------------
 
-def get_available_tasks(category: Optional[str] = None) -> list:
-    """Get available MIEB tasks from mteb, optionally filtered by category."""
+def get_available_tasks(
+    benchmark_variant: str = "MIEB-lite",
+    category: Optional[str] = None,
+) -> list:
+    """Return the task list for the requested benchmark variant.
+
+    Args:
+        benchmark_variant: "MIEB-lite" or "MIEB".  Controls which canonical
+            task set is loaded so the denominator matches the paper tables.
+        category: Optional category filter (one of MIEB_CATEGORIES).
+    """
     try:
         import mteb
     except ImportError:
         raise RuntimeError("mteb is required. Install: pip install mteb")
 
-    # Try to get MIEB benchmark tasks
+    # Map friendly name → mteb benchmark identifier
+    _benchmark_id = {
+        "MIEB-lite": "MIEB(lite)",
+        "MIEB": "MIEB",
+    }.get(benchmark_variant, "MIEB(lite)")
+
     try:
-        benchmark = mteb.get_benchmark("MIEB(lite)")
+        benchmark = mteb.get_benchmark(_benchmark_id)
         tasks = benchmark.tasks if hasattr(benchmark, "tasks") else list(benchmark)
     except Exception:
-        # Fallback: get individual tasks by type
+        # Fallback when mteb does not know the benchmark name
         tasks = []
-        for task_type in ["ImageClustering", "ImageClassification", "Any2AnyRetrieval", "Retrieval",
-                          "ZeroShotClassification", "Compositionality", "ImageTextPairClassification",
-                          "DocumentUnderstanding", "VisionCentricQA", "VisualSTS", "VisualSTS(eng)", "VisualSTS(multi)"]:
+        for task_type in [
+            "ImageClustering", "ImageClassification", "Any2AnyRetrieval", "Retrieval",
+            "ZeroShotClassification", "Compositionality", "ImageTextPairClassification",
+            "DocumentUnderstanding", "VisionCentricQA", "VisualSTS", "VisualSTS(eng)",
+            "VisualSTS(multi)",
+        ]:
             try:
-                found = mteb.get_tasks(task_types=[task_type])
-                tasks.extend(found)
+                tasks.extend(mteb.get_tasks(task_types=[task_type]))
             except Exception:
                 pass
 
     if category:
         filtered = []
         for t in tasks:
-            task_type = getattr(t, "metadata", {})
-            if isinstance(task_type, dict):
-                tt = task_type.get("type", "")
-            else:
-                tt = getattr(task_type, "type", "")
-            mapped = TASK_TYPE_TO_CATEGORY.get(str(tt), "")
-            if mapped == category:
+            md = getattr(t, "metadata", {})
+            tt = md.get("type", "") if isinstance(md, dict) else str(getattr(md, "type", ""))
+            if TASK_TYPE_TO_CATEGORY.get(str(tt), "") == category:
                 filtered.append(t)
         return filtered
 
@@ -317,15 +363,25 @@ def run_evaluation(
     output_path: Optional[str] = None,
     model_name: str = "RAG-NAS-AlignedEncoder",
     skip_gated: bool = True,
+    benchmark_variant: str = "MIEB-lite",
 ) -> Dict[str, Any]:
     """
     Run MIEB evaluation and return results in Paper Table 2 format.
 
     Args:
-        skip_gated: If True, skip gated datasets that require authentication
+        skip_gated: If True, skip gated datasets that require HF authentication.
+        benchmark_variant: "MIEB-lite" or "MIEB". Controls the canonical task list
+            and therefore the denominator used when computing category averages.
+
+    Denominator convention (matches MIEB paper):
+        Category averages are computed over ALL tasks in the benchmark variant,
+        not just the ones that were successfully evaluated.  Skipped or failed
+        tasks contribute 0.0 so the number is conservative but comparable.
+        The output CSV includes an "N_run/N_total" column per category so
+        reviewers can see exactly which tasks were missing.
 
     Returns:
-        Dict with category scores and overall MIEB/MIEB-lite averages.
+        Dict with category scores and the overall benchmark average.
     """
     try:
         import mteb
@@ -334,120 +390,171 @@ def run_evaluation(
 
     wrapper = AlignedEncoderMTEBWrapper(aligned_encoder, device=device)
 
-    # Collect results by category
+    # Per-category accumulators: list of (score_or_None) for every expected task
+    # We separate evaluated scores from the total task count per category so we
+    # can compute the correct denominator later.
     category_scores: Dict[str, List[float]] = {cat: [] for cat in MIEB_CATEGORIES}
-    skipped_tasks = []
-    failed_tasks = []
+    # Track how many tasks were expected vs run per category for the coverage report
+    category_total: Dict[str, int] = {cat: 0 for cat in MIEB_CATEGORIES}
+    skipped_tasks: List[str] = []
+    failed_tasks: List[str] = []
 
     if tasks and tasks[0] == "quick":
-        # Quick evaluation mode
+        # Quick evaluation mode — uses a fixed representative subset per category.
+        # Category averages here are over the quick subset, NOT the full benchmark.
+        print("\n[Quick mode] Evaluating one representative task per category.")
         for cat, task_names in QUICK_TASKS.items():
-            try:
-                mteb_tasks = mteb.get_tasks(tasks=task_names)
-                results = mteb.evaluate(wrapper, tasks=mteb_tasks)
-                for r in results:
-                    # Extract primary metric
-                    metric_key = CATEGORY_METRICS.get(cat, "main_score")
-                    score = _extract_score(r, metric_key)
+            for tname in task_names:
+                category_total[cat] += 1
+                try:
+                    mteb_tasks = mteb.get_tasks(tasks=[tname])
+                    results = mteb.evaluate(wrapper, tasks=mteb_tasks)
+                    score = None
+                    for r in results:
+                        metric_key = CATEGORY_METRICS.get(cat, "main_score")
+                        score = _extract_score(r, metric_key)
+                        if score is not None:
+                            break
                     if score is not None:
                         category_scores[cat].append(score)
-            except Exception as e:
-                print(f"  Warning: Could not evaluate {cat}: {e}")
-                failed_tasks.extend(task_names)
+                        print(f"  ✓ [{cat}] {tname}: {score:.4f}")
+                    else:
+                        category_scores[cat].append(0.0)
+                        failed_tasks.append(tname)
+                        print(f"  ✗ [{cat}] {tname}: score extraction failed (counted as 0)")
+                except Exception as e:
+                    category_scores[cat].append(0.0)
+                    failed_tasks.append(tname)
+                    print(f"  ✗ [{cat}] {tname}: {e} (counted as 0)")
     else:
-        # Full evaluation - evaluate tasks one by one to handle errors gracefully
+        # Full benchmark evaluation.
         try:
             if tasks:
                 mteb_tasks = mteb.get_tasks(tasks=tasks)
             else:
-                mteb_tasks = get_available_tasks()
+                mteb_tasks = get_available_tasks(benchmark_variant=benchmark_variant)
 
-            print(f"\n📋 Total tasks to evaluate: {len(mteb_tasks)}")
+            print(f"\nBenchmark variant : {benchmark_variant}")
+            print(f"Total tasks       : {len(mteb_tasks)}")
+
+            # Build per-category expected-task counts from the canonical task list
+            # BEFORE evaluation so skips/failures are reflected in the denominator.
+            for task in mteb_tasks:
+                md = getattr(task, "metadata", {})
+                tt = md.get("type", "") if isinstance(md, dict) else str(getattr(md, "type", ""))
+                cat = TASK_TYPE_TO_CATEGORY.get(str(tt), "")
+                if cat:
+                    category_total[cat] += 1
+
+            _known_broken = {
+                "Fashion200kI2TRetrieval", "NIGHTSI2IRetrieval",
+                "VisualSTS17Multilingual", "VisualSTS-b-Multilingual",
+            }
 
             for idx, task in enumerate(mteb_tasks, 1):
-                task_name = task.metadata.name if hasattr(task.metadata, 'name') else str(task)
-                
-                if task_name in ["Fashion200kI2TRetrieval", "NIGHTSI2IRetrieval", "VisualSTS17Multilingual", "VisualSTS-b-Multilingual"]:
-                    print(f"\n[{idx}/{len(mteb_tasks)}] ⊗ Skipped (Known Missing/Broken HF Dataset): {task_name}")
+                task_name = (
+                    task.metadata.name if hasattr(task.metadata, "name") else str(task)
+                )
+
+                md = getattr(task, "metadata", {})
+                tt = md.get("type", "") if isinstance(md, dict) else str(getattr(md, "type", ""))
+                cat = TASK_TYPE_TO_CATEGORY.get(str(tt), "")
+
+                if task_name in _known_broken:
+                    print(f"\n[{idx}/{len(mteb_tasks)}] ⊗ Known broken dataset: {task_name} (counted as 0)")
+                    if cat:
+                        category_scores[cat].append(0.0)
+                    failed_tasks.append(task_name)
                     continue
 
                 print(f"\n[{idx}/{len(mteb_tasks)}] Evaluating: {task_name}")
-
                 try:
-                    # Evaluate single task
                     results = mteb.evaluate(wrapper, tasks=[task])
-
+                    score = None
                     for r in results:
-                        task_type = _get_task_type(r)
-                        cat = TASK_TYPE_TO_CATEGORY.get(task_type, "")
-                        if cat:
-                            metric_key = CATEGORY_METRICS.get(cat, "main_score")
-                            score = _extract_score(r, metric_key)
-                            if score is not None:
-                                category_scores[cat].append(score)
-                                print(f"  ✓ Score: {score:.4f} ({metric_key})")
+                        metric_key = CATEGORY_METRICS.get(cat, "main_score") if cat else "main_score"
+                        score = _extract_score(r, metric_key)
+                        if score is not None:
+                            break
+
+                    if score is not None and cat:
+                        category_scores[cat].append(score)
+                        print(f"  ✓ Score: {score:.4f} ({metric_key})")
+                    elif cat:
+                        category_scores[cat].append(0.0)
+                        failed_tasks.append(task_name)
+                        print(f"  ✗ Score extraction failed — counted as 0.0")
 
                 except Exception as e:
                     error_msg = str(e)
-                    # Check if it's a gated dataset error
-                    if "gated dataset" in error_msg.lower() or "must be authenticated" in error_msg.lower():
-                        if skip_gated:
-                            print(f"  ⊗ Skipped (gated dataset): {task_name}")
-                            skipped_tasks.append(task_name)
-                            continue
-
-                    # Other errors
-                    print(f"  ⊗ Skipped (Benchmark Load Error): {task_name}")
-                    print(f"    Reason: {error_msg}")
-                    failed_tasks.append(task_name)
+                    is_gated = (
+                        "gated dataset" in error_msg.lower()
+                        or "must be authenticated" in error_msg.lower()
+                    )
+                    if is_gated and skip_gated:
+                        print(f"  ⊗ Gated dataset skipped: {task_name} (counted as 0)")
+                        skipped_tasks.append(task_name)
+                    else:
+                        print(f"  ✗ Error: {error_msg} (counted as 0)")
+                        failed_tasks.append(task_name)
+                    # Skipped/failed tasks count as 0 in the denominator
+                    if cat:
+                        category_scores[cat].append(0.0)
 
         except Exception as e:
-            print(f"  Error during evaluation setup: {e}")
+            print(f"Error during evaluation setup: {e}")
             import traceback
             traceback.print_exc()
 
     # Print summary of skipped/failed tasks
     if skipped_tasks:
         print(f"\n⊗ Skipped {len(skipped_tasks)} gated dataset(s):")
-        for task in skipped_tasks:
-            print(f"  - {task}")
-
+        for t in skipped_tasks:
+            print(f"  - {t}")
     if failed_tasks:
-        print(f"\n✗ Failed {len(failed_tasks)} task(s):")
-        for task in failed_tasks:
-            print(f"  - {task}")
+        print(f"\n✗ Failed/broken {len(failed_tasks)} task(s):")
+        for t in failed_tasks:
+            print(f"  - {t}")
 
-    # Compute category averages
+    # Compute category averages over the FULL expected task count (correct denominator).
     result_row = {"Model": model_name}
-    all_scores = []
+    all_scores: List[float] = []
 
     for cat in MIEB_CATEGORIES:
         scores = category_scores[cat]
-        if scores:
-            avg = np.mean(scores) * 100  # Convert to percentage
-            result_row[cat] = f"{avg:.1f}"
-            all_scores.extend(scores)
-        else:
+        n_total = category_total[cat]
+        if n_total == 0:
+            # Category not present in this benchmark variant
             result_row[cat] = "—"
+            result_row[f"{cat} (N_run/N_total)"] = "—"
+        else:
+            # Pad with zeros for any expected tasks that were never attempted
+            # (e.g., benchmark loading failed before the per-task loop)
+            while len(scores) < n_total:
+                scores.append(0.0)
+            avg = float(np.mean(scores)) * 100
+            n_run = sum(1 for s in scores if s > 0.0)
+            result_row[cat] = f"{avg:.1f}"
+            result_row[f"{cat} (N_run/N_total)"] = f"{n_run}/{n_total}"
+            all_scores.extend(scores)
 
-    # Overall MIEB / MIEB-lite score
+    # Overall score: labelled after the benchmark variant to avoid confusion
+    # between MIEB and MIEB-lite (they have different task sets and cannot share
+    # a single number).
+    overall_key = benchmark_variant  # e.g., "MIEB-lite" or "MIEB"
     if all_scores:
-        overall = np.mean(all_scores) * 100
-        result_row["MIEB"] = f"{overall:.1f}"
-        result_row["MIEB-lite"] = f"{overall:.1f}"
+        result_row[overall_key] = f"{float(np.mean(all_scores)) * 100:.1f}"
     else:
-        result_row["MIEB"] = "—"
-        result_row["MIEB-lite"] = "—"
+        result_row[overall_key] = "—"
 
-    # Print table
-    _print_table(result_row)
+    _print_table(result_row, benchmark_variant=benchmark_variant)
 
-    # Save CSV
     if output_path:
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-        fieldnames = ["Model"] + MIEB_CATEGORIES + ["MIEB", "MIEB-lite"]
+        coverage_cols = [f"{cat} (N_run/N_total)" for cat in MIEB_CATEGORIES]
+        fieldnames = ["Model"] + MIEB_CATEGORIES + coverage_cols + [overall_key]
         with open(output_path, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
             writer.writeheader()
             writer.writerow(result_row)
         print(f"\nResults saved → {output_path}")
@@ -489,24 +596,28 @@ def _get_task_type(result) -> str:
         return ""
 
 
-def _print_table(row: Dict[str, str]):
+def _print_table(row: Dict[str, str], benchmark_variant: str = "MIEB-lite"):
     """Pretty-print results in Paper Table 2 format."""
-    print("\n" + "=" * 90)
-    print("MIEB Benchmark Results (Paper Table 2 Format)")
-    print("=" * 90)
+    print("\n" + "=" * 100)
+    print(f"MIEB Benchmark Results — {benchmark_variant} (Paper Table 2 Format)")
+    print("=" * 100)
 
-    # Header
-    cols = ["Model"] + MIEB_CATEGORIES + ["MIEB", "MIEB-lite"]
+    cols = ["Model"] + MIEB_CATEGORIES + [benchmark_variant]
     widths = [max(len(c), len(str(row.get(c, "—")))) + 2 for c in cols]
 
     header = " | ".join(c.center(w) for c, w in zip(cols, widths))
     print(header)
     print("-" * len(header))
 
-    # Data row
     values = " | ".join(str(row.get(c, "—")).center(w) for c, w in zip(cols, widths))
     print(values)
-    print("=" * 90)
+    print("=" * 100)
+
+    # Coverage summary (N_run / N_total per category)
+    print("\nTask coverage (N_run / N_total):")
+    for cat in MIEB_CATEGORIES:
+        cov = row.get(f"{cat} (N_run/N_total)", "—")
+        print(f"  {cat:<20} {cov}")
 
 
 # ---------------------------------------------------------------------------
@@ -546,6 +657,10 @@ Note: Gated datasets like 'facebook/winoground' require:
     ap.add_argument("--model_name", default="RAG-NAS-AlignedEncoder",
                     help="Model name for the results table")
     ap.add_argument("--device", default="auto")
+    ap.add_argument("--benchmark", default="MIEB-lite", choices=["MIEB-lite", "MIEB"],
+                    help="Benchmark variant to evaluate. 'MIEB-lite' (default) uses the "
+                         "reduced canonical task set; 'MIEB' uses the full task set. "
+                         "The overall score column is labelled accordingly.")
     ap.add_argument("--skip-gated", dest="skip_gated", action="store_true", default=True,
                     help="Skip gated datasets that require authentication (default: True)")
     ap.add_argument("--no-skip-gated", dest="skip_gated", action="store_false",
@@ -575,6 +690,7 @@ Note: Gated datasets like 'facebook/winoground' require:
         output_path=args.output,
         model_name=args.model_name,
         skip_gated=args.skip_gated,
+        benchmark_variant=args.benchmark,
     )
 
 

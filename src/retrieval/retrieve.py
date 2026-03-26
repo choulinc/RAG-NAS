@@ -349,12 +349,27 @@ def retrieve(
     Retrieve top-k OpenMMLab UIR entries for a query.
 
     - filters supports: task, dataset, collection, provider, repo
-    - dense uses the narrative view
-    - keyword uses the kv view
-    - rerank uses simple rule boosts (dataset/task exact matches, mention of collection/name)
+    - dense uses the narrative view (SentenceTransformer embeddings)
+    - keyword uses the BM25 kv view
+    - rerank applies rule-based score boosts (task / dataset exact match)
 
     Returns list of hits, each hit is a dict:
-      {doc_id, name, collection, task, dataset, metrics, config_repo_path, weights_url, score, context_text}
+      {doc_id, name, collection, task, dataset, metrics, config_repo_path,
+       weights_url, score, context_text}
+
+    .. warning:: **Hand-crafted fusion weights — require ablation before publication.**
+
+       ``dense_weight=0.55`` and ``kw_weight=0.45`` were set by manual inspection,
+       not by grid-search on a held-out validation set.  The reranking boost
+       values (+10 task/dataset match, +3 token overlap, etc.) in ``_select_result``
+       were likewise chosen heuristically.  Before claiming retrieval quality in a
+       paper, these hyperparameters should be:
+         (a) tuned on a small labelled validation split (e.g. 50–100 query/relevant
+             pairs), OR
+         (b) replaced with a learned re-ranker (e.g. cross-encoder fine-tuned on
+             the UIR corpus).
+       An ablation table (dense-only vs BM25-only vs hybrid) is expected by
+       top-venue reviewers.
     """
     # Load UIR jsonl
     uirs: List[Dict[str, Any]] = []
